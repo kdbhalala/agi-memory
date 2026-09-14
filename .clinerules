@@ -1,7 +1,0 @@
-# Agent Memory Discipline (Cline & Roo Code)
-
-When working in this repository:
-1. **Recall Precedents**: Use `memory_recall` or `memory_recall_deep` with `project="agent-memory"` to check architectural decisions and past fixes before making changes.
-2. **Follow Invariants**: Strictly follow [`rules/architecture.md`](rules/architecture.md) (zero external runtime dependencies).
-3. **Record Learnings**: Call `memory_record` whenever establishing a pattern or fixing a non-trivial issue.
-4. **Verification**: Always run `python3 test_offline.py && python3 eval_l1.py && python3 eval_l2.py && python3 integrate.py test` before finishing tasks.

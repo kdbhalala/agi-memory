@@ -1,8 +1,0 @@
-<!-- AGENT_MEMORY_DISCIPLINE_START -->
-# Agent Memory Discipline (agent-memory MCP)
-
-When working on non-trivial tasks, debugging errors, or establishing patterns:
-1. **Recall Prior Precedents**: Call `memory_recall` on the `agent-memory` MCP server with relevant keywords and project name to check past decisions and established patterns before making assumptions.
-2. **Deep Architecture Search**: If L1 recall is thin or high-level architecture/cross-project context is needed, use `memory_recall_deep`.
-3. **Record Verified Learnings**: When settling an architectural pattern, fixing a recurring bug, or agreeing on project conventions, call `memory_record` so all coding agents stay in sync.
-<!-- AGENT_MEMORY_DISCIPLINE_END -->

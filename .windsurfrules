@@ -1,7 +1,0 @@
-# Agent Memory Discipline (Windsurf)
-
-When working in this repository:
-1. Call `memory_recall` on the `agent-memory` MCP server with `project="agent-memory"` before making assumptions or refactoring code.
-2. Comply with [`rules/architecture.md`](rules/architecture.md) (strictly zero external runtime dependencies).
-3. Record newly established patterns or bug fixes using `memory_record`.
-4. Always run offline tests before finishing: `python3 test_offline.py && python3 eval_l1.py && python3 eval_l2.py && python3 integrate.py test`.
