@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different files stay different. Coverage is now about 13% of commands, the
   simple ones.
 
+### Security
+- **Credentials kept out of stored shell commands.** The post-tool hook now
+  masks secrets before storing a command, including the shell forms `redact()`
+  missed: `Bearer x`, `-pPASS`, `--password x`, `-u user:pass`,
+  `-H "X-Key: k"` and `GH_TOKEN=x cmd`. Failure signatures shown at session
+  start and in `.agent/MEMORY.md` keep only allowlisted tokens. Commands
+  recorded before this release are not rewritten.
+
 ### Added
 - **Recurring Command Failures at session start.** Up to 4 commands that failed
   in 3 or more sessions are shown in the session-start context and in the
