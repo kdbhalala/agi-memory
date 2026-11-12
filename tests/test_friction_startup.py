@@ -67,11 +67,12 @@ assert norm_bin == "pytest tests/foo.py", f"Expected 'pytest tests/foo.py', got 
 
 # First three args kept (binary + 3 args = 4 tokens)
 norm_args = EpisodicLayer.normalize_command("npm run test -- --verbose extra_arg ignored")
-assert norm_args == "npm run test --", f"Expected 'npm run test --', got {norm_args!r}"
+assert norm_args == "npm run test", f"Expected 'npm run test' (bare -- is not a flag), got {norm_args!r}"
 
 # Digits replaced with #
 norm_digits = EpisodicLayer.normalize_command("pytest tests/test_42.py -k case7")
-assert norm_digits == "pytest tests/test_#.py -k case#", f"Got {norm_digits!r}"
+# -k is in the value-flag stoplist (curl/openssl take keys after it)
+assert norm_digits == "pytest tests/test_#.py", f"Got {norm_digits!r}"
 
 # Signatures reach session start and MEMORY.md: nothing secret-bearing survives
 for raw, want in [
@@ -81,11 +82,36 @@ for raw, want in [
     ("git push https://user:tok@github.com/x", "git push"),
     ("GITHUB_TOKEN=ghp_xyz npm test", "npm test"),
     ("docker run --password xyz img", "docker run"),
+    ("mysql -psecretpw db", "mysql"),
+    ('cli "--password" hunter2', "cli"),
+    ("cli --db-password=hunter2 x", "cli"),
+    ("vault login s.Xy7Zq9Wk2Lm4Np8R", "vault login"),
+    ("curl -u admin:pa55 http://x", "curl"),
 ]:
     got = EpisodicLayer.normalize_command(raw)
     assert got == want, f"{raw!r} -> {got!r}, expected {want!r}"
-    for secret in ("hunter2", "sk-abc", "S3cret", "tok@", "ghp_xyz", "xyz img"):
+    for secret in ("hunter2", "sk-abc", "S3cret", "tok@", "ghp_xyz", "xyz img", "secretpw", "Xy7Zq", "pa55"):
         assert secret not in got, f"secret leaked from {raw!r}: {got!r}"
+
+# Allowlist must not cost the signature its useful parts
+assert EpisodicLayer.normalize_command("sed -n 1,5p src/agi_memory/hooks.py") == "sed -n #,#p src/agi_memory/hooks.py"
+assert EpisodicLayer.normalize_command("ls -la src") == "ls -la src"
+
+# The stored command (hook_post_tool) masks the shell forms redact() misses
+from agi_memory.redact import redact_command  # noqa: E402
+for raw, secret in [
+    ('curl -H "Authorization: Bearer sk-abcdef" https://x', "sk-abcdef"),
+    ("mysql -u root -pS3cret!", "S3cret"),
+    ("GITHUB_TOKEN=abc123xyz npm test", "abc123xyz"),
+    ("docker run --password hunter2 img", "hunter2"),
+    ('cli "--password" hunter2', "hunter2"),
+    ("cli --db-password=hunter2 x", "hunter2"),
+    ("curl -u admin:pa55 http://x", "pa55"),
+    ("psql postgres://u:hunter22@db/x", "hunter22"),
+]:
+    assert secret not in redact_command(raw), f"stored command leaks {secret!r}: {redact_command(raw)!r}"
+assert redact_command("mkdir -p some/dir") == "mkdir -p some/dir"
+assert redact_command("npm run build") == "npm run build"
 
 # Compound commands return "" (ignored by friction)
 assert EpisodicLayer.normalize_command("git status; npm test") == ""

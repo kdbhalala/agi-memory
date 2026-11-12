@@ -46,6 +46,29 @@ def _looks_like_credential(value: str) -> bool:
     return classes >= 3 or (classes == 2 and len(value) >= 16)
 
 
+_SECRET_WORD = r"(?:pass|passwd|password|pwd|token|secret|key|auth|cred|bearer)"
+_QVAL = r"(\"[^\"]*\"|'[^']*'|\S+)"
+# Shell-command forms redact() misses. Only for command lines: in prose,
+# `-pPASS`-style masking would eat ordinary text.
+_CMD_SECRETS = (
+    re.compile(r"(?i)(\bbearer\s+)" + _QVAL),                                  # Authorization: Bearer x
+    re.compile(r"(?i)([\"']?--[\w-]*" + _SECRET_WORD + r"[\w-]*[\"']?[=\s]\s*)" + _QVAL),  # --password x, "--api-key"=x
+    re.compile(r"(?i)(\b[A-Z_]*" + _SECRET_WORD + r"[A-Z_]*=)" + _QVAL),       # GH_TOKEN=x cmd
+    re.compile(r"((?:^|\s)-[uHP]\s+)" + _QVAL),                                # curl -u u:p, -H "X-Key: k", -P pw
+)
+_ATTACHED_P = re.compile(r"((?:^|\s)-p)(?=[^\s-])\S+")                          # mysql -pPASS
+
+
+def redact_command(cmd):
+    """redact() plus the flag, header and env-var forms secrets take in a shell line."""
+    if not cmd or not isinstance(cmd, str):
+        return cmd
+    cmd = redact(cmd)
+    for pattern in _CMD_SECRETS:
+        cmd = pattern.sub(lambda m: m.group(1) + REDACTED, cmd)
+    return _ATTACHED_P.sub(lambda m: m.group(1) + REDACTED, cmd)
+
+
 def redact(text, extra: Iterable[str] = ()):
     """Return text with credentials replaced by [REDACTED]. Non-strings pass through."""
     if not text or not isinstance(text, str):

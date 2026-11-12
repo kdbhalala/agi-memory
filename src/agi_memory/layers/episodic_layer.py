@@ -19,16 +19,19 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from agi_memory.config import DEFAULT_DB, get_default_db, hidden_subprocess_kwargs
     from agi_memory.layers.base import Hit, MemoryLayer, open_db, stem_terms
+    from agi_memory.redact import _looks_like_credential
 except ImportError:
     try:
         from ..config import DEFAULT_DB, get_default_db, hidden_subprocess_kwargs
         from .base import Hit, MemoryLayer, open_db, stem_terms
+        from ..redact import _looks_like_credential
     except (ImportError, ValueError):
         from config import DEFAULT_DB, get_default_db, hidden_subprocess_kwargs
         # Script mode is how every lifecycle hook runs. Omitting open_db here
         # made EpisodicLayer() raise NameError inside the hooks' bare except,
         # so no real session was ever recorded.
         from layers.base import Hit, MemoryLayer, open_db, stem_terms
+        from redact import _looks_like_credential
 
 
 # How a session ended, as distinct from whether it stopped. 'unknown' is the
@@ -45,9 +48,13 @@ NOT_RESUMABLE = frozenset({"abandoned", "blocked", "superseded", "unknown"})
 # this many of its latest sessions ran it with no failure.
 FRICTION_MAX = 4
 FRICTION_CLEAR_AFTER = 2
-# Signature tokens that can carry a credential: values, and flags taking one.
-_VALUE_TOKEN = re.compile(r"[=@]|://|^[^/]*:[^/]")
-_SECRET_FLAG = re.compile(r"^(-p.*|-u|-H|-a|--(header|password|pass|token|user|auth|key|secret)\b.*)$", re.I)
+# Signature tokens are an allowlist, not a blocklist of secret shapes: a
+# subcommand/path word, or a short lowercase flag whose name names no secret.
+# The first token that fits neither ends the signature.
+_SIG_WORD = re.compile(r"^[A-Za-z0-9_][\w./,#%+-]{0,59}$")
+_SIG_FLAG = re.compile(r"^(-[a-z]{1,2}|--[a-z][a-z-]{0,30})$")
+_SIG_SECRET = re.compile(r"(?i)pass|pwd|token|secret|key|auth|cred|bearer|header|user|login")
+_SIG_VALUE_FLAG = frozenset({"-p", "-u", "-H", "-a", "-k", "-e"})  # flags whose next arg is often a secret
 # Commands whose exit 1 means "no" (no match, files differ, test false).
 _EXIT1_IS_ANSWER = frozenset({"grep", "rg", "egrep", "fgrep", "diff", "cmp", "test", "[", "git-diff"})
 
@@ -626,9 +633,18 @@ class EpisodicLayer(MemoryLayer):
         head = [toks[0].split("/")[-1]]
         for t in toks[1:4]:
             # A signature is shown at session start and written to MEMORY.md,
-            # so it stops before anything that can carry a secret: a value
-            # (`k=v`, `u:p@host`, a URL) or a flag that takes one.
-            if _VALUE_TOKEN.search(t) or _SECRET_FLAG.match(t):
+            # so only tokens that cannot hold a secret are kept (see _SIG_*).
+            t = t.strip("'\"")
+            if t.startswith("-"):
+                ok = bool(_SIG_FLAG.match(t)) and not _SIG_SECRET.search(t) and t not in _SIG_VALUE_FLAG
+            else:
+                # Short words (`1,5p`) and paths are not credentials; long
+                # mixed tokens may be. ponytail: a random secret shaped like a
+                # path (`ab12/Cd34`) passes -- the stored command was already
+                # through redact_command, so this is the second line, not the only one.
+                path = re.fullmatch(r"[\w.-]+(/[\w.-]+)+", t) is not None
+                ok = bool(_SIG_WORD.match(t)) and (len(t) < 16 or path or not _looks_like_credential(t))
+            if not ok:
                 break
             head.append(t)
         head = [re.sub(r"\d+", "#", t.strip("'\"")) for t in head]

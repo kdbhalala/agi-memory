@@ -570,12 +570,13 @@ def hook_post_tool(project: Optional[str] = None) -> None:
             return
         if tool == "Bash" and inp.get("command"):
             try:
-                from agi_memory.redact import redact
+                from agi_memory.redact import redact, redact_command
             except ImportError:
-                from redact import redact
+                from redact import redact, redact_command
             # Stored commands come back into context (hints below, session-start
             # friction, MEMORY.md), so a credential in one must not be kept.
-            cmd = redact(str(inp["command"]).strip()[:300])
+            # Redact before truncating, or a cut can split a secret past a pattern.
+            cmd = redact_command(str(inp["command"]).strip())[:300]
             resp = str(payload.get("tool_response", ""))
             failed = bool(_FAILURE_MARKERS.search(resp))
             det = {"command": cmd, "exit": 1 if failed else 0}
