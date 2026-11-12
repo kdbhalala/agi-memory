@@ -70,8 +70,22 @@ norm_args = EpisodicLayer.normalize_command("npm run test -- --verbose extra_arg
 assert norm_args == "npm run test --", f"Expected 'npm run test --', got {norm_args!r}"
 
 # Digits replaced with #
-norm_digits = EpisodicLayer.normalize_command("curl http://localhost:8080/api/v1/items/42")
-assert norm_digits == "curl http://localhost:#/api/v#/items/#", f"Got {norm_digits!r}"
+norm_digits = EpisodicLayer.normalize_command("pytest tests/test_42.py -k case7")
+assert norm_digits == "pytest tests/test_#.py -k case#", f"Got {norm_digits!r}"
+
+# Signatures reach session start and MEMORY.md: nothing secret-bearing survives
+for raw, want in [
+    ("psql postgres://u:hunter2@db/x", "psql"),
+    ('curl -H "Authorization: Bearer sk-abc" https://x', "curl"),
+    ("mysql -u root -pS3cret!", "mysql"),
+    ("git push https://user:tok@github.com/x", "git push"),
+    ("GITHUB_TOKEN=ghp_xyz npm test", "npm test"),
+    ("docker run --password xyz img", "docker run"),
+]:
+    got = EpisodicLayer.normalize_command(raw)
+    assert got == want, f"{raw!r} -> {got!r}, expected {want!r}"
+    for secret in ("hunter2", "sk-abc", "S3cret", "tok@", "ghp_xyz", "xyz img"):
+        assert secret not in got, f"secret leaked from {raw!r}: {got!r}"
 
 # Compound commands return "" (ignored by friction)
 assert EpisodicLayer.normalize_command("git status; npm test") == ""

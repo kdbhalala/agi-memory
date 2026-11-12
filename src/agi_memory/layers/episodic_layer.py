@@ -45,6 +45,9 @@ NOT_RESUMABLE = frozenset({"abandoned", "blocked", "superseded", "unknown"})
 # this many of its latest sessions ran it with no failure.
 FRICTION_MAX = 4
 FRICTION_CLEAR_AFTER = 2
+# Signature tokens that can carry a credential: values, and flags taking one.
+_VALUE_TOKEN = re.compile(r"[=@]|://|^[^/]*:[^/]")
+_SECRET_FLAG = re.compile(r"^(-p.*|-u|-H|-a|--(header|password|pass|token|user|auth|key|secret)\b.*)$", re.I)
 # Commands whose exit 1 means "no" (no match, files differ, test false).
 _EXIT1_IS_ANSWER = frozenset({"grep", "rg", "egrep", "fgrep", "diff", "cmp", "test", "[", "git-diff"})
 
@@ -613,13 +616,21 @@ class EpisodicLayer(MemoryLayer):
         if re.search(r"[;|&\n]|<<", s):
             return ""
         toks = s.split()
-        while toks and toks[0] in ("rtk", "proxy"):
+        # wrappers and leading `VAR=value` assignments (`TOKEN=x npm test`)
+        while toks and (toks[0] in ("rtk", "proxy") or re.match(r"^[A-Za-z_]\w*=", toks[0])):
             toks = toks[1:]
         if not toks:
             return ""
         # Three args, not two: `sed -n 1,5p <file>` failing on five different
         # files is five facts, and two args merged them into one false one.
-        head = [toks[0].split("/")[-1]] + toks[1:4]
+        head = [toks[0].split("/")[-1]]
+        for t in toks[1:4]:
+            # A signature is shown at session start and written to MEMORY.md,
+            # so it stops before anything that can carry a secret: a value
+            # (`k=v`, `u:p@host`, a URL) or a flag that takes one.
+            if _VALUE_TOKEN.search(t) or _SECRET_FLAG.match(t):
+                break
+            head.append(t)
         head = [re.sub(r"\d+", "#", t.strip("'\"")) for t in head]
         return " ".join(head)[:120]
 
