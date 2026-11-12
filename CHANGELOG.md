@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Failure tracker (`memory_friction`) blamed the wrong command.** A compound
+  command's exit code was attributed to its first word, so `git status` showed
+  as failing in 34 sessions when a trailing `| grep` had matched nothing.
+  Compound commands (`;`, `|`, `&&`, `||`, heredocs) are now excluded, since the
+  harness reports one exit code per line. Leading `cd <dir> &&` and
+  `rtk`/`rtk proxy` wrappers are stripped, `grep`/`rg`/`diff`/`test` exiting 1
+  no longer counts as a failure, and signatures keep three arguments so that
+  different files stay different. Coverage is now about 13% of commands, the
+  simple ones.
+
+### Added
+- **Recurring Command Failures at session start.** Up to 4 commands that failed
+  in 3 or more sessions are shown in the session-start context and in the
+  `.agent/MEMORY.md` snapshot. A command drops off once its last 2 sessions ran
+  it with no failure. When there is nothing to show, no section is printed.
+  Adapted from TokenEconomizer's micro-skills (arXiv 2610.22732).
+
 ## [0.14.3] - 2026-10-21
 
 ### Fixed
