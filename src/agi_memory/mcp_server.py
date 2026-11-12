@@ -735,6 +735,7 @@ def call_tool(name, args):
         if not rows:
             return "(no recurring errors recorded yet -- post-tool hooks log runs as they happen)"
         return "\n".join(f"{r['signature']} -- {r['sessions']} sessions, {r['hits']} failures"
+                         + (" -- passing in last 2 sessions" if r.get("cleared") else "")
                          for r in rows)
     if name == "code_structure":
         cl = CodeLayer(project=project)
