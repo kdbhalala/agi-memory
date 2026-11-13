@@ -108,6 +108,11 @@ for raw, secret in [
     ("cli --db-password=hunter2 x", "hunter2"),
     ("curl -u admin:pa55 http://x", "pa55"),
     ("psql postgres://u:hunter22@db/x", "hunter22"),
+    ("mysql -psecret123 db", "secret123"),          # lowercase+digit password: fail closed
+    ("mysql -pabcdefg db", "abcdefg"),              # lowercase-only password: fail closed
+    ('curl -u "admin:pa ss" http://x', "pa ss"),    # quoted value with a space
+    ("curl --user admin:pw9 http://x", "pw9"),
+    ("curl -u apitoken: http://x", "apitoken"),     # token with empty password
 ]:
     assert secret not in redact_command(raw), f"stored command leaks {secret!r}: {redact_command(raw)!r}"
 assert redact_command("mkdir -p some/dir") == "mkdir -p some/dir"

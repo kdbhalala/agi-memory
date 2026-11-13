@@ -55,13 +55,14 @@ _CMD_SECRETS = (
     re.compile(r"(?i)([\"']?--[\w-]*" + _SECRET_WORD + r"[\w-]*[\"']?[=\s]\s*)" + _QVAL),  # --password x, "--api-key"=x
     re.compile(r"(?i)(\b[A-Z_]*" + _SECRET_WORD + r"[A-Z_]*=)" + _QVAL),       # GH_TOKEN=x cmd
     re.compile(r"((?:^|\s)-[HP]\s+)" + _QVAL),                                 # -H "X-Key: k", -P pw
-    re.compile(r"((?:^|\s)-u\s+)(\S*:\S+)"),                                    # curl -u user:pass (not `sort -u f`)
+    # curl -u user:pass / --user "u:p w" (not `sort -u f`); `token:` with no password counts
+    re.compile(r"((?:^|\s)(?:-u|--user)[=\s]\s*)(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|\S*:\S*)"),
 )
-# mysql -pPASS. A value of plain lowercase letters is an option word (`find
-# -path`, `-print`, `perl -pe`), measured as the bulk of false hits on the real
-# store. ponytail: an all-lowercase password after -p is missed here; the
-# friction signature allowlist still keeps it out of context.
-_ATTACHED_P = re.compile(r"((?:^|\s)-p)(?![a-z-]*\d*[)|;\"']*(?:\s|$))(?=[^\s-])\S+")
+# mysql -pPASS, fail-closed: anything after -p is masked except these exact
+# option words, measured as the false hits on the real store (`find -path`,
+# `-print0`, `-prune`, `-perm`, `perl -pe`, `xcode-select -print-path`).
+_ATTACHED_P = re.compile(
+    r"((?:^|\s)-p)(?!(?:ath|rint0?|rint-path|rune|erm|e|ie|i)(?=[\s)|;\"']|$))(?=[^\s)|;\"'-])\S+")
 
 
 def redact_command(cmd):

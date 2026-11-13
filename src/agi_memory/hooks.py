@@ -581,7 +581,8 @@ def hook_post_tool(project: Optional[str] = None) -> None:
             failed = bool(_FAILURE_MARKERS.search(resp))
             det = {"command": cmd, "exit": 1 if failed else 0}
             if failed:
-                det["error"] = redact(_normalize_error(resp[:600]))
+                # Error output often echoes the command, so it gets the same masking.
+                det["error"] = redact_command(_normalize_error(resp[:600]))
             ep.record_event(sid, "command", cmd, det, project=proj)
             if failed:
                 sig = _normalize_error(resp[:600])
