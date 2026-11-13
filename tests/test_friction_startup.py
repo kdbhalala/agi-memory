@@ -112,6 +112,9 @@ for raw, secret in [
     ("mysql -pabcdefg db", "abcdefg"),              # lowercase-only password: fail closed
     ("mysql -p'Secr3t' db", "Secr3t"),              # quoted value
     ('mysql -p"pa ss" db', "pa ss"),                # quoted value with a space
+    ("mysql -p'ab'\"cd\"ef db", "cd"),              # adjacent quoted parts
+    ('mysql -p"a\\"bXq9" db', "bXq9"),              # escaped quote inside
+    ("mysql -p'unclosedQ7 db", "unclosedQ7"),       # missing closing quote
     ('curl -u "admin:pa ss" http://x', "pa ss"),    # quoted value with a space
     ("curl --user admin:pw9 http://x", "pw9"),
     ("curl -u apitoken: http://x", "apitoken"),     # token with empty password
