@@ -111,6 +111,11 @@ for raw, secret in [
 ]:
     assert secret not in redact_command(raw), f"stored command leaks {secret!r}: {redact_command(raw)!r}"
 assert redact_command("mkdir -p some/dir") == "mkdir -p some/dir"
+# option words the -p / -u rules must not eat (false hits seen on the real store)
+for keep in ["find . -path '*.cs' -print", "perl -pe 's/a/b/' f", "sort -u names.txt",
+             "xcode-select -print-path", "git add -u", "mysql -u root db",
+             "find . -print0", 'open "$(xcode-select -p)"']:
+    assert redact_command(keep) == keep, f"over-redacted: {redact_command(keep)!r}"
 assert redact_command("npm run build") == "npm run build"
 
 # Compound commands return "" (ignored by friction)

@@ -54,9 +54,14 @@ _CMD_SECRETS = (
     re.compile(r"(?i)(\bbearer\s+)" + _QVAL),                                  # Authorization: Bearer x
     re.compile(r"(?i)([\"']?--[\w-]*" + _SECRET_WORD + r"[\w-]*[\"']?[=\s]\s*)" + _QVAL),  # --password x, "--api-key"=x
     re.compile(r"(?i)(\b[A-Z_]*" + _SECRET_WORD + r"[A-Z_]*=)" + _QVAL),       # GH_TOKEN=x cmd
-    re.compile(r"((?:^|\s)-[uHP]\s+)" + _QVAL),                                # curl -u u:p, -H "X-Key: k", -P pw
+    re.compile(r"((?:^|\s)-[HP]\s+)" + _QVAL),                                 # -H "X-Key: k", -P pw
+    re.compile(r"((?:^|\s)-u\s+)(\S*:\S+)"),                                    # curl -u user:pass (not `sort -u f`)
 )
-_ATTACHED_P = re.compile(r"((?:^|\s)-p)(?=[^\s-])\S+")                          # mysql -pPASS
+# mysql -pPASS. A value of plain lowercase letters is an option word (`find
+# -path`, `-print`, `perl -pe`), measured as the bulk of false hits on the real
+# store. ponytail: an all-lowercase password after -p is missed here; the
+# friction signature allowlist still keeps it out of context.
+_ATTACHED_P = re.compile(r"((?:^|\s)-p)(?![a-z-]*\d*[)|;\"']*(?:\s|$))(?=[^\s-])\S+")
 
 
 def redact_command(cmd):
