@@ -169,7 +169,7 @@ agi-memory integrate hooks agy claude
 ```
 
 Supported lifecycle triggers:
-- **`session-start` / `PreInvocation`**: Injects pinned Core Memory invariants and top project precedents directly into the prompt context.
+- **`session-start` / `PreInvocation`**: Injects pinned Core Memory invariants, top project precedents, and up to 4 commands that keep failing across sessions (a command drops off once its last 2 sessions ran it cleanly) directly into the prompt context.
 - **`user-prompt-submit`** (Claude Code `UserPromptSubmit`, OpenCode `ctx.session.hook("prompt", ...)`): When you send a prompt, memories that share several of its words are added to the context, up to 3, so the assistant sees them without deciding to call `memory_recall`. Prompts that match nothing closely add nothing. Antigravity has no prompt event wired yet. Past sessions that match are listed too, however long ago they were.
 - **`stop`** (Claude Code `Stop`): if the session committed or changed files and recorded no memory, the agent is asked once to record the why and mark how the session ended. A session that changed nothing, or already recorded something, stops untouched.
 - **Session history from git**: the first real prompt becomes the session's goal, and at session end the commits made and files changed since it started become its summary, so a later prompt can find the work.

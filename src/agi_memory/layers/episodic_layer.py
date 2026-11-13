@@ -19,16 +19,19 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from agi_memory.config import DEFAULT_DB, get_default_db, hidden_subprocess_kwargs
     from agi_memory.layers.base import Hit, MemoryLayer, open_db, stem_terms
+    from agi_memory.redact import _looks_like_credential
 except ImportError:
     try:
         from ..config import DEFAULT_DB, get_default_db, hidden_subprocess_kwargs
         from .base import Hit, MemoryLayer, open_db, stem_terms
+        from ..redact import _looks_like_credential
     except (ImportError, ValueError):
         from config import DEFAULT_DB, get_default_db, hidden_subprocess_kwargs
         # Script mode is how every lifecycle hook runs. Omitting open_db here
         # made EpisodicLayer() raise NameError inside the hooks' bare except,
         # so no real session was ever recorded.
         from layers.base import Hit, MemoryLayer, open_db, stem_terms
+        from redact import _looks_like_credential
 
 
 # How a session ended, as distinct from whether it stopped. 'unknown' is the
@@ -39,6 +42,21 @@ OUTCOMES = frozenset({"completed", "abandoned", "blocked", "superseded", "unknow
 
 # Outcomes a later session must not silently pick up where it left off.
 NOT_RESUMABLE = frozenset({"abandoned", "blocked", "superseded", "unknown"})
+
+# Recurring failures shown at session start: at most this many (TokenEconomizer
+# caps its injected facts at 4 / ~150 tokens), and one stops being shown once
+# this many of its latest sessions ran it with no failure.
+FRICTION_MAX = 4
+FRICTION_CLEAR_AFTER = 2
+# Signature tokens are an allowlist, not a blocklist of secret shapes: a
+# subcommand/path word, or a short lowercase flag whose name names no secret.
+# The first token that fits neither ends the signature.
+_SIG_WORD = re.compile(r"^[A-Za-z0-9_][\w./,#%+-]{0,59}$")
+_SIG_FLAG = re.compile(r"^(-[a-z]{1,2}|--[a-z][a-z-]{0,30})$")
+_SIG_SECRET = re.compile(r"(?i)pass|pwd|token|secret|key|auth|cred|bearer|header|user|login")
+_SIG_VALUE_FLAG = frozenset({"-p", "-u", "-H", "-a", "-k", "-e"})  # flags whose next arg is often a secret
+# Commands whose exit 1 means "no" (no match, files differ, test false).
+_EXIT1_IS_ANSWER = frozenset({"grep", "rg", "egrep", "fgrep", "diff", "cmp", "test", "[", "git-diff"})
 
 _RESUME_WARNING = {
     "abandoned": "**Do not resume without asking.** This work was dropped, not finished; "
@@ -583,12 +601,53 @@ class EpisodicLayer(MemoryLayer):
 
     @staticmethod
     def normalize_command(cmd: str) -> str:
-        """Group key for a command: binary + first two args, numbers/paths stripped."""
-        toks = (cmd or "").strip().split()
+        """Group key for a command: binary + first two args, numbers/paths stripped.
+
+        The part after the last `cd <dir> &&` is the command, and proxy
+        wrappers (rtk, rtk proxy) are not: measured on the real store, those
+        two turned "cd /x &&" and "rtk proxy" into the top friction signatures.
+
+        A compound command (`;`, `|`, `&&`, `||`, heredoc) gets "": its exit
+        code belongs to whichever part ran last, so blaming its first word
+        made "git status" the top failure of a repo where `| grep` found nothing.
+        Coverage, measured 2026-11-13: 86% of recorded commands and 87% of
+        failures are compound, so friction sees about 13% of commands. Blaming
+        the last stage instead is no better: it made `head`/`tail` the top
+        "failures". The harness gives one exit code per line, so there is
+        nothing truthful to attribute.
+        # ponytail: compound failures are dropped, not attributed; needs a
+        # per-part exit code, which no harness hook currently reports.
+        """
+        s = (cmd or "").strip()
+        s = re.sub(r"^(?:cd\s+\S+\s*&&\s*)+", "", s)
+        if re.search(r"[;|&\n]|<<", s):
+            return ""
+        toks = s.split()
+        # wrappers and leading `VAR=value` assignments (`TOKEN=x npm test`)
+        while toks and (toks[0] in ("rtk", "proxy") or re.match(r"^[A-Za-z_]\w*=", toks[0])):
+            toks = toks[1:]
         if not toks:
             return ""
-        head = [toks[0].split("/")[-1]] + toks[1:3]
-        head = [re.sub(r"\d+", "#", t) for t in head]
+        # Three args, not two: `sed -n 1,5p <file>` failing on five different
+        # files is five facts, and two args merged them into one false one.
+        head = [toks[0].split("/")[-1]]
+        for t in toks[1:4]:
+            # A signature is shown at session start and written to MEMORY.md,
+            # so only tokens that cannot hold a secret are kept (see _SIG_*).
+            t = t.strip("'\"")
+            if t.startswith("-"):
+                ok = bool(_SIG_FLAG.match(t)) and not _SIG_SECRET.search(t) and t not in _SIG_VALUE_FLAG
+            else:
+                # Short words (`1,5p`) and paths are not credentials; long
+                # mixed tokens may be. ponytail: a random secret shaped like a
+                # path (`ab12/Cd34`) passes -- the stored command was already
+                # through redact_command, so this is the second line, not the only one.
+                path = re.fullmatch(r"[\w.-]+(/[\w.-]+)+", t) is not None
+                ok = bool(_SIG_WORD.match(t)) and (len(t) < 16 or path or not _looks_like_credential(t))
+            if not ok:
+                break
+            head.append(t)
+        head = [re.sub(r"\d+", "#", t.strip("'\"")) for t in head]
         return " ".join(head)[:120]
 
     def upsert_imported(self, session_id: str, project: str, goal: str = "",
@@ -728,36 +787,63 @@ class EpisodicLayer(MemoryLayer):
 
         Only nonzero-exit commands count; one session retrying in a loop is one
         witness, not many.
+
+        `cleared` is evidence, not age: the last FRICTION_CLEAR_AFTER sessions
+        that ran the signature ran it without a single failure. Contradiction
+        retirement from TokenEconomizer (arXiv 2610.22732), kept mechanical.
         """
         proj = project or self.project or "global"
         con = self._get_con(mode="ro")
         try:
             rows = con.execute("""
-                SELECT summary, session_id, details FROM episodic_events
-                WHERE project = ? AND event_type = 'command'
+                SELECT id, summary, session_id, details FROM episodic_events
+                WHERE project = ? AND event_type = 'command' ORDER BY id
             """, (proj,)).fetchall()
         except sqlite3.Error:
             rows = []
         con.close()
         groups: Dict[str, Dict[str, Any]] = {}
-        for summary, sid, details in rows:
+        # signature -> session -> [last event id, failed in that session]
+        runs: Dict[str, Dict[str, List[Any]]] = {}
+        for eid, summary, sid, details in rows:
             try:
-                failed = (json.loads(details) if details else {}).get("exit", 0) != 0
+                code = (json.loads(details) if details else {}).get("exit", 0)
             except (json.JSONDecodeError, TypeError, AttributeError):
-                failed = False
-            if not failed:
-                continue
+                code = 0
             norm = self.normalize_command(summary or "")
             if not norm:
+                continue
+            # grep finding nothing exits 1; that is an answer, not friction.
+            failed = code != 0 and not (code == 1 and norm.split()[0] in _EXIT1_IS_ANSWER)
+            per = runs.setdefault(norm, {}).setdefault(sid, [eid, False])
+            per[0] = eid
+            per[1] = per[1] or failed
+            if not failed:
                 continue
             g = groups.setdefault(norm, {"signature": norm, "sessions": set(), "hits": 0})
             g["sessions"].add(sid)
             g["hits"] += 1
-        out = [{"signature": g["signature"], "sessions": len(g["sessions"]),
-                "hits": g["hits"]} for g in groups.values()
-               if len(g["sessions"]) >= min_sessions]
+        out = []
+        for g in groups.values():
+            if len(g["sessions"]) < min_sessions:
+                continue
+            latest = sorted(runs[g["signature"]].values(), key=lambda r: r[0])[-FRICTION_CLEAR_AFTER:]
+            cleared = len(latest) == FRICTION_CLEAR_AFTER and not any(f for _, f in latest)
+            out.append({"signature": g["signature"], "sessions": len(g["sessions"]),
+                        "hits": g["hits"], "cleared": cleared})
         out.sort(key=lambda r: (-r["sessions"], -r["hits"]))
         return out
+
+    def active_friction(self, project: str | None = None, min_sessions: int = 3,
+                        limit: int = FRICTION_MAX) -> List[Dict[str, Any]]:
+        """Recurring failures still worth showing at session start."""
+        return [r for r in self.failed_command_stats(project, min_sessions)
+                if not r["cleared"]][:limit]
+
+    @staticmethod
+    def format_friction(rows: List[Dict[str, Any]]) -> str:
+        return "\n".join(f"- `{r['signature']}` -- failed in {r['sessions']} sessions ({r['hits']} runs)"
+                         for r in rows)
 
     def get_timeline(self, project: Optional[str] = None, limit: int = 5,
                      agent: Optional[str] = None) -> List[Dict[str, Any]]:

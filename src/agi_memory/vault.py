@@ -658,6 +658,8 @@ def redact_store(extra: tuple = (), vault_dir: Path | str | None = None,
         con.close()
         _rebuild_fts(s_db, ("observations_fts",))
 
+    commands = _redact_commands(s_db, extra) if s_db.exists() else 0
+
     lines = 0
     obs_file = v_dir / "observations.jsonl"
     if obs_file.exists():
@@ -679,7 +681,59 @@ def redact_store(extra: tuple = (), vault_dir: Path | str | None = None,
                 out.write(line)
         tmp.replace(obs_file)
 
-    return {"observations": rows, "vault_lines": lines}
+    return {"observations": rows, "vault_lines": lines, "commands": commands}
+
+
+def _redact_commands(db: Path, extra: tuple) -> int:
+    """Mask credentials in recorded shell commands (episodic `command` events).
+
+    Commands recorded before the post-tool hook redacted them were stored as
+    typed. They never reach the vault, but they come back into context through
+    the command hints and the session-start failures section.
+    """
+    try:
+        from agi_memory.redact import REDACTED, redact_command
+    except ImportError:
+        from redact import REDACTED, redact_command
+
+    def clean(text):
+        if not isinstance(text, str):
+            return text
+        for value in extra:
+            text = text.replace(value, REDACTED)
+        return redact_command(text)
+
+    con = open_db(db)
+    try:
+        try:
+            rows = con.execute(
+                "SELECT id, summary, details FROM episodic_events WHERE event_type = 'command'").fetchall()
+        except sqlite3.Error:
+            return 0  # no episodic tables in this database
+        updates = []
+        for eid, summary, details in rows:
+            new_details = details
+            try:
+                d = json.loads(details) if details else None
+            except (json.JSONDecodeError, TypeError):
+                d = None
+            if isinstance(d, dict):
+                nd = {k: (clean(v) if k in ("command", "error") else v) for k, v in d.items()}
+                if nd != d:
+                    new_details = json.dumps(nd)
+            elif isinstance(details, str):
+                new_details = clean(details)
+            new_summary = clean(summary)
+            if new_summary != summary or new_details != details:
+                updates.append((new_summary, new_details, eid))
+        con.executemany("UPDATE episodic_events SET summary = ?, details = ? WHERE id = ?", updates)
+        con.commit()
+        return len(updates)
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def _rebuild_fts(db: Path, fts_tables: tuple) -> None:

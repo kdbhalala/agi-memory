@@ -735,6 +735,7 @@ def call_tool(name, args):
         if not rows:
             return "(no recurring errors recorded yet -- post-tool hooks log runs as they happen)"
         return "\n".join(f"{r['signature']} -- {r['sessions']} sessions, {r['hits']} failures"
+                         + (" -- passing in last 2 sessions" if r.get("cleared") else "")
                          for r in rows)
     if name == "code_structure":
         cl = CodeLayer(project=project)
@@ -1360,7 +1361,8 @@ def main(argv: list[str] | None = None) -> None:
             if a.values:
                 extra = tuple(s.strip() for s in Path(a.values).read_text(encoding="utf-8").splitlines() if s.strip())
             res = vault.redact_store(extra=extra)
-            print(f"Redacted {res['observations']} observation(s) and {res['vault_lines']} vault line(s). "
+            print(f"Redacted {res['observations']} observation(s), {res['vault_lines']} vault line(s) "
+                  f"and {res.get('commands', 0)} recorded command(s). "
                   "The vault's git history still holds the old text: rotate the credentials.")
             return
         elif cmd == "recall":

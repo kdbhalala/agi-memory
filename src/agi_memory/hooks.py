@@ -191,6 +191,7 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
     pinned_blocks: List[Dict[str, Any]] = []
     recent_hits: List[str] = []
     episodic_recap: str = ""
+    friction: str = ""
     session_count: int = 0
 
     try:
@@ -224,6 +225,10 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
         if recent_sessions:
             session_count = len(recent_sessions)
             episodic_recap = EpisodicLayer.format_briefing(recent_sessions)
+        try:  # must never cost the session its registration below
+            friction = EpisodicLayer.format_friction(ep.active_friction(project=proj))
+        except Exception:
+            friction = ""
         # Register new active session, noting files already dirty so the stop
         # hook can tell this session's changes from ones it inherited.
         resumed = bool(sid and ep.get_session(sid))
@@ -247,7 +252,7 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
     except Exception:
         pass
 
-    if not pinned_blocks and not recent_hits and not episodic_recap and not fresh_line:
+    if not pinned_blocks and not recent_hits and not episodic_recap and not friction and not fresh_line:
         return
 
     output: List[str] = []
@@ -271,6 +276,10 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
         output.append("\n## Top Project Precedents")
         for h in recent_hits:
             output.append(f"- {_clip(h)}")
+
+    if friction:
+        output.append("\n## Recurring Command Failures")
+        output.append(friction)
 
     if fresh_line:
         output.append("\n## Vault Sync")
@@ -560,12 +569,20 @@ def hook_post_tool(project: Optional[str] = None) -> None:
         if not sid:
             return
         if tool == "Bash" and inp.get("command"):
-            cmd = str(inp["command"]).strip()[:300]
+            try:
+                from agi_memory.redact import redact, redact_command
+            except ImportError:
+                from redact import redact, redact_command
+            # Stored commands come back into context (hints below, session-start
+            # friction, MEMORY.md), so a credential in one must not be kept.
+            # Redact before truncating, or a cut can split a secret past a pattern.
+            cmd = redact_command(str(inp["command"]).strip())[:300]
             resp = str(payload.get("tool_response", ""))
             failed = bool(_FAILURE_MARKERS.search(resp))
             det = {"command": cmd, "exit": 1 if failed else 0}
             if failed:
-                det["error"] = _normalize_error(resp[:600])
+                # Error output often echoes the command, so it gets the same masking.
+                det["error"] = redact_command(_normalize_error(resp[:600]))
             ep.record_event(sid, "command", cmd, det, project=proj)
             if failed:
                 sig = _normalize_error(resp[:600])
@@ -810,6 +827,7 @@ def build_snapshot_text(proj: str, limit: int = SNAPSHOT_PRECEDENTS) -> str:
     pinned_blocks: list = []
     recent_hits: list = []
     episodic_recap = ""
+    friction = ""
     try:
         try:
             from agi_memory.layers.session_layer import SessionLayer
@@ -822,8 +840,9 @@ def build_snapshot_text(proj: str, limit: int = SNAPSHOT_PRECEDENTS) -> str:
         recent_hits = [h.text for h in
                        l1.search("architecture convention pattern decision rule invariant", limit=limit)]
         try:
-            episodic_recap = EpisodicLayer.format_briefing(
-                EpisodicLayer(project=proj).get_timeline(project=proj, limit=3))
+            ep = EpisodicLayer(project=proj)
+            episodic_recap = EpisodicLayer.format_briefing(ep.get_timeline(project=proj, limit=3))
+            friction = EpisodicLayer.format_friction(ep.active_friction(project=proj))
         except Exception:
             episodic_recap = ""
     except Exception:
@@ -844,6 +863,8 @@ def build_snapshot_text(proj: str, limit: int = SNAPSHOT_PRECEDENTS) -> str:
         for h in recent_hits:
             lines.append(f"- {_clip(h)}")
         lines.append("")
+    if friction:
+        lines += ["## Recurring Command Failures", "", friction, ""]
     if len(lines) <= 4:
         return ""
     lines.append("*Query `memory_recall` / `memory_timeline` / `code_structure` for more.*")
