@@ -1613,8 +1613,23 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _rd_tmp:
         _rd_json.dumps({"guid": _rd_hash, "content_hash": _rd_hash, "project": "rd-proj", "title": "short note",
                         "narrative": f"prose token Qw3!Zx9$Lp2k and {_fake_google}"}) + "\nnot json\n",
         encoding="utf-8")
+    # A command recorded before the post-tool hook redacted them, stored as typed.
+    from agi_memory.layers.episodic_layer import EpisodicLayer as _EpRd
+    _ep_rd = _EpRd(db_path=_rd_db, project="rd-proj")
+    _ep_rd.record_event("s-rd", "command", "mysql -u root -pHunterPw9 db",
+                        details={"command": "mysql -u root -pHunterPw9 db", "exit": 1,
+                                 "error": "denied for -pHunterPw9"}, project="rd-proj")
+    _ep_rd.record_event("s-rd", "command", "npm run build",
+                        details={"command": "npm run build", "exit": 0}, project="rd-proj")
     _rd_out = _vault_rd.redact_store(extra=("Qw3!Zx9$Lp2k", "short"), vault_dir=_rd_v, session_db=_rd_db)
-    assert _rd_out == {"observations": 1, "vault_lines": 1}, _rd_out
+    assert _rd_out == {"observations": 1, "vault_lines": 1, "commands": 1}, _rd_out
+    _c = sqlite3.connect(_rd_db)
+    try:
+        _cmd_rows = _c.execute("select summary, details from episodic_events where event_type='command'").fetchall()
+    finally:
+        _c.close()
+    assert all("HunterPw9" not in (s + (d or "")) for s, d in _cmd_rows), _cmd_rows
+    assert ("npm run build",) in [(s,) for s, _ in _cmd_rows], "clean commands must be left alone"
     _c = sqlite3.connect(_rd_db)
     try:
         _n, _h = _c.execute("select narrative, content_hash from observations where id = ?", (_rd_id,)).fetchone()
@@ -1626,7 +1641,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as _rd_tmp:
     assert _vl[1] == "not json" and _fake_google not in _vl[0] and "Qw3!" not in _vl[0]
     assert '"short note"' in _vl[0], "literals under 8 characters must be ignored"
     assert _vault_rd.redact_store(extra=("Qw3!Zx9$Lp2k",), vault_dir=_rd_v, session_db=_rd_db) == \
-        {"observations": 0, "vault_lines": 0}
+        {"observations": 0, "vault_lines": 0, "commands": 0}
 
 # 10m. A prompt gets matching memories pushed to it, and only close matches:
 # the search ORs terms, so without the overlap gate every prompt would drag in
