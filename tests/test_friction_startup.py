@@ -110,6 +110,8 @@ for raw, secret in [
     ("psql postgres://u:hunter22@db/x", "hunter22"),
     ("mysql -psecret123 db", "secret123"),          # lowercase+digit password: fail closed
     ("mysql -pabcdefg db", "abcdefg"),              # lowercase-only password: fail closed
+    ("mysql -p'Secr3t' db", "Secr3t"),              # quoted value
+    ('mysql -p"pa ss" db', "pa ss"),                # quoted value with a space
     ('curl -u "admin:pa ss" http://x', "pa ss"),    # quoted value with a space
     ("curl --user admin:pw9 http://x", "pw9"),
     ("curl -u apitoken: http://x", "apitoken"),     # token with empty password

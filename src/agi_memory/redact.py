@@ -62,7 +62,7 @@ _CMD_SECRETS = (
 # option words, measured as the false hits on the real store (`find -path`,
 # `-print0`, `-prune`, `-perm`, `perl -pe`, `xcode-select -print-path`).
 _ATTACHED_P = re.compile(
-    r"((?:^|\s)-p)(?!(?:ath|rint0?|rint-path|rune|erm|e|ie|i)(?=[\s)|;\"']|$))(?=[^\s)|;\"'-])\S+")
+    r"((?:^|\s)-p)(?!(?:ath|rint0?|rint-path|rune|erm|e|ie|i)(?=[\s)|;\"']|$))(?:\"[^\"]*\"|'[^']*'|(?=[^\s)|;\"'-])\S+)")  # -p'x', -p"a b" too
 
 
 def redact_command(cmd):
