@@ -115,6 +115,8 @@ for raw, secret in [
     ("mysql -p'ab'\"cd\"ef db", "cd"),              # adjacent quoted parts
     ('mysql -p"a\\"bXq9" db', "bXq9"),              # escaped quote inside
     ("mysql -p'unclosedQ7 db", "unclosedQ7"),       # missing closing quote
+    ("mysql -pe'Sec9x' db", "Sec9x"),               # option-word prefix + quote
+    ('mysql -pi"Sec8y" db', "Sec8y"),
     ('curl -u "admin:pa ss" http://x', "pa ss"),    # quoted value with a space
     ("curl --user admin:pw9 http://x", "pw9"),
     ("curl -u apitoken: http://x", "apitoken"),     # token with empty password

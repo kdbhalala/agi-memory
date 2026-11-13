@@ -62,7 +62,7 @@ _CMD_SECRETS = (
 # option words, measured as the false hits on the real store (`find -path`,
 # `-print0`, `-prune`, `-perm`, `perl -pe`, `xcode-select -print-path`).
 _ATTACHED_P = re.compile(
-    r"((?:^|\s)-p)(?!(?:ath|rint0?|rint-path|rune|erm|e|ie|i)(?=[\s)|;\"']|$))"
+    r"((?:^|\s)-p)(?!(?:ath|rint0?|rint-path|rune|erm|e|ie|i)(?=[\s)|;]|$))"  # no quote terminator: -pe'pw' is a password
     # the whole shell word: quoted parts (escapes, unclosed quote) and bare chars, adjacent
     r"(?=[^\s)|;-])(?:\"(?:[^\"\\]|\\.)*\"?|'[^']*'?|[^\s)|;\"'])+")
 
