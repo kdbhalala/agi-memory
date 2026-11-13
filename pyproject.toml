@@ -1,6 +1,6 @@
 [project]
 name = "agi-memory"
-version = "0.14.3"
+version = "0.15.0"
 description = "Turnkey zero-dependency four-pillar cognitive memory framework (Epistemic, Semantic, Episodic, Structural Code Graph) with MCP server for Claude Code, Cursor, Codex, OpenCode, Antigravity, and more"
 readme = "README.md"
 requires-python = ">=3.10"

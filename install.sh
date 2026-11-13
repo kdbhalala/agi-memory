@@ -14,7 +14,7 @@ set -e
 # fails when it drifts from pyproject.toml -- otherwise a `curl | bash` would run
 # unreleased code from the tip of main while every other install method
 # installed a checksummed tag.
-VERSION="0.14.3"
+VERSION="0.15.0"
 
 BOLD="\033[1m"
 GREEN="\033[0;32m"

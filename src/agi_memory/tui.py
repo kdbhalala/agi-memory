@@ -42,7 +42,7 @@ except ImportError:
     from config import get_default_db, get_vault_dir
     from layers.base import open_db
     from vault import deduplicate_and_compact
-    __version__ = "0.14.3"
+    __version__ = "0.15.0"
 
 # ANSI styles & 16-color / 256-color palette
 ESC = "\033["
