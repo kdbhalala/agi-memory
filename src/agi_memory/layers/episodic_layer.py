@@ -281,6 +281,7 @@ class EpisodicLayer(MemoryLayer):
                 summary TEXT NOT NULL,
                 session_count INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                origin TEXT DEFAULT '',
                 UNIQUE(project, period_type, period_key)
             )
         """)
@@ -288,6 +289,10 @@ class EpisodicLayer(MemoryLayer):
             CREATE INDEX IF NOT EXISTS idx_episodic_rollups_proj_period
             ON episodic_rollups(project, period_type, period_key)
         """)
+        cur.execute("PRAGMA table_info(episodic_rollups)")
+        rcols = {r[1] for r in cur.fetchall()}
+        if "origin" not in rcols:
+            cur.execute("ALTER TABLE episodic_rollups ADD COLUMN origin TEXT DEFAULT ''")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS episodic_meta (
@@ -1185,18 +1190,20 @@ class EpisodicLayer(MemoryLayer):
         period_key: str,
         summary: str,
         session_count: int = 0,
+        origin: str = "",
     ) -> None:
         """Upsert a periodic rollup summary (period_type: 'day' or 'week')."""
         con = self._get_con()
         try:
             con.execute("""
-                INSERT INTO episodic_rollups (project, period_type, period_key, summary, session_count)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO episodic_rollups (project, period_type, period_key, summary, session_count, origin)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project, period_type, period_key) DO UPDATE SET
                     summary = excluded.summary,
                     session_count = excluded.session_count,
+                    origin = CASE WHEN excluded.origin != '' THEN excluded.origin ELSE origin END,
                     created_at = CURRENT_TIMESTAMP
-            """, (project, period_type, period_key, summary, session_count))
+            """, (project, period_type, period_key, summary, session_count, origin))
             con.commit()
         finally:
             con.close()
@@ -1207,7 +1214,7 @@ class EpisodicLayer(MemoryLayer):
         try:
             cur = con.cursor()
             cur.execute("""
-                SELECT id, project, period_type, period_key, summary, session_count, created_at
+                SELECT id, project, period_type, period_key, summary, session_count, created_at, origin
                 FROM episodic_rollups
                 WHERE project = ? AND period_type = ? AND period_key = ?
             """, (project, period_type, period_key))
@@ -1222,6 +1229,7 @@ class EpisodicLayer(MemoryLayer):
                 "summary": row[4],
                 "session_count": row[5],
                 "created_at": row[6],
+                "origin": row[7] if len(row) > 7 and row[7] else "",
             }
         finally:
             con.close()
@@ -1237,7 +1245,7 @@ class EpisodicLayer(MemoryLayer):
         con = self._get_con(mode="ro")
         try:
             cur = con.cursor()
-            query = "SELECT id, project, period_type, period_key, summary, session_count, created_at FROM episodic_rollups WHERE 1=1"
+            query = "SELECT id, project, period_type, period_key, summary, session_count, created_at, origin FROM episodic_rollups WHERE 1=1"
             params: list[Any] = []
             if proj:
                 query += " AND project = ?"
@@ -1258,6 +1266,7 @@ class EpisodicLayer(MemoryLayer):
                     "summary": r[4],
                     "session_count": r[5],
                     "created_at": r[6],
+                    "origin": r[7] if len(r) > 7 and r[7] else "",
                 }
                 for r in rows
             ]
@@ -1324,7 +1333,13 @@ class EpisodicLayer(MemoryLayer):
         finally:
             con.close()
 
-    def set_handoff(self, note: str, project: Optional[str] = None) -> Dict[str, Any]:
+    def set_handoff(
+        self,
+        note: str,
+        project: Optional[str] = None,
+        created_at: Optional[float] = None,
+        origin: str = ""
+    ) -> Dict[str, Any]:
         """Store a redacted handoff note for the next session (max ~2 KB)."""
         proj = project or self.project
         try:
@@ -1336,9 +1351,10 @@ class EpisodicLayer(MemoryLayer):
             cleaned = cleaned[:2048]
         data = {
             "note": cleaned,
-            "created_at": time.time(),
+            "created_at": created_at if created_at is not None else time.time(),
             "deliveries": 0,
             "project": proj,
+            "origin": origin,
         }
         self.set_meta(f"handoff:{proj}", json.dumps(data))
         return data

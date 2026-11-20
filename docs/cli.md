@@ -125,4 +125,41 @@ agi-memory redact --values secrets.txt   # also remove these literals, one per l
 This rewrites the local database and `observations.jsonl` without dropping or duplicating
 records. The vault's git history still holds the old text, so rotate the credential.
 
+### Explicit Handoff Notes & Prompt Clock
+Record a structured handoff note (what was done, next steps, blockers) for the next session.
+Delivered at `session-start` up to 3 times or until replaced:
+```bash
+# Record handoff from CLI or assistant slash command (/handoff):
+agi-memory handoff "Next session: verify opencode fallback and merge branch" --project my-app
+```
+Every prompt also includes the wall-clock time and user name (`[18:19 IST -- user]`) by default via the `user-prompt-submit` hook. To disable prompt clock injection, set:
+```bash
+export AGI_MEMORY_PROMPT_CLOCK=0
+```
+
+### Migrating from the Remember Plugin
+agi-memory provides full parity with the Remember plugin without external dependencies:
+
+| Remember Plugin Feature | agi-memory Equivalent | Notes |
+|---|---|---|
+| `identity.md` | Pinned core memory (`agi-memory pin`) | Unconditional injection into active context |
+| Git backup repository | Vault sync (`agi-memory sync`) | Multi-machine sync via Git / GitHub |
+| `/remember:doctor` | `agi-integrate doctor` | Verifies installed hooks and configs across all tools |
+| Mid-session / crash saves | Missed session recovery | Automatically closes stale rows & summarizes at session start |
+| Prompt clock header | User-prompt hook clock | Local time + TZ + user on every turn (`AGI_MEMORY_PROMPT_CLOCK`) |
+| `/remember` handoff | `/handoff` & `memory_handoff` | Delivered at next session-start (up to 3 times or until replaced) |
+| History rollup (`recent.md`, `archive.md`) | `agi-memory import-remember` | Imports day/week rollups, handoffs, and today files |
+
+To migrate existing history from Remember:
+```bash
+# 1. Preview what will be imported without writing to the database:
+agi-memory import-remember --dry-run
+
+# 2. Run the import (finds current repo .remember/ and ~/.remember stores):
+agi-memory import-remember
+
+# 3. Uninstall the Remember plugin:
+# Claude Code: remove from plugins or delete ~/.claude/plugins/cache/.../remember
+```
+
 ---

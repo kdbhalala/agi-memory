@@ -1360,6 +1360,13 @@ def main(argv: list[str] | None = None) -> None:
                 import history_import
             history_import.main(argv[1:])
             return
+        elif cmd in ("import-remember", "import_remember"):
+            try:
+                from agi_memory import import_remember
+            except ImportError:
+                import import_remember
+            import_remember.main(argv[1:])
+            return
         elif cmd == "log":
             cmd_log(argv[1:])
             return

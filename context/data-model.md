@@ -123,16 +123,16 @@ Tracks agent session lifecycles, duration, touched files, events, and git commit
 - **`episodic_rollups`**:
   - `id`: INTEGER PRIMARY KEY AUTOINCREMENT
   - `project`: TEXT NOT NULL (indexed)
-  - `tier`: TEXT NOT NULL (`daily`, `weekly`)
-  - `period_key`: TEXT NOT NULL (e.g. `YYYY-MM-DD` for daily, `YYYY-Www` for weekly)
+  - `period_type`: TEXT NOT NULL (`day`, `week`)
+  - `period_key`: TEXT NOT NULL (e.g. `YYYY-MM-DD` for day, `YYYY-Www` for week)
   - `summary`: TEXT NOT NULL
   - `session_count`: INTEGER NOT NULL DEFAULT 0
   - `created_at`: TEXT DEFAULT CURRENT_TIMESTAMP
-  - `UNIQUE(project, tier, period_key)`
+  - `origin`: TEXT DEFAULT '' (`history-import`, `agent-inferred`)
+  - `UNIQUE(project, period_type, period_key)`
 - **`episodic_meta`**:
-  - `key`: TEXT PRIMARY KEY (e.g. `last_compression_epoch`)
-  - `value`: TEXT NOT NULL
-  - `updated_at`: TEXT DEFAULT CURRENT_TIMESTAMP
+  - `key`: TEXT PRIMARY KEY (e.g. `handoff:<project>`, `opencode_last_working_model`, `last_compression_timestamp`)
+  - `value`: TEXT NOT NULL (for `handoff:<project>`: JSON object `{"note": str, "created_at": float, "deliveries": int, "project": str, "origin": str}`)
 
 ### `code_files`, `code_symbols`, and `code_edges` (L4 Structural Code Graph)
 Zero-dependency AST and streaming regex symbol index and dependency graph.

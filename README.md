@@ -177,12 +177,15 @@ agi-memory history-import --limit 20            # recent sessions -> L1 digests
 agi-memory history-import --index                # every session -> episodic history
 agi-memory history-import --harness codex --project my-app
 agi-bootstrap --repo . --with-history             # README + git commits + history, one pass
+agi-memory import-remember --dry-run             # preview migration from Remember plugin (.remember -> rollups/handoff)
 ```
 
 Read today: **Claude Code, Codex, OpenCode.** Every other detected tool is
 listed at install with the reason it is skipped, so the gap is visible rather
 than implied. `hermes` is refused on purpose — its session files are outbound
 API request bodies including auth headers.
+
+Migrating from Remember plugin: `agi-memory import-remember` imports existing `.remember` day/week rollups and handoffs. See [CLI Usage](docs/cli.md#migrating-from-the-remember-plugin).
 
 Each session becomes one L1 observation (`origin="history-import"`, title
 `[claude:1a2b3c4d] ...`, project taken from the session's working directory).
