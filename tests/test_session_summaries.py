@@ -697,8 +697,57 @@ class TestSessionSummaries(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    # 23. Recover missed sessions closes stale sessions and summarizes up to 3 oldest
+    def test_recover_missed_sessions(self):
+        from agi_memory.hooks import hook_recover_sessions
+        import sqlite3
+
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+
+        # Create 4 ended sessions with events but no summary, with staggered started_at
+        con = sqlite3.connect(self.db_path)
+        cur = con.cursor()
+        sids = []
+        for i in range(1, 5):
+            sid = f"ses_test_recover_{i}"
+            sids.append(sid)
+            # started_at i days ago
+            started = f"2026-11-{10+i:02d} 10:00:00"
+            cur.execute("""
+                INSERT INTO episodic_sessions (session_id, project, goal, started_at, status, summary)
+                VALUES (?, ?, ?, ?, 'completed', '')
+            """, (sid, self.project, f"Goal {i}", started))
+            cur.execute("""
+                INSERT INTO episodic_events (session_id, project, event_type, summary)
+                VALUES (?, ?, 'commit', ?)
+            """, (sid, self.project, f"commit message {i}"))
+        con.commit()
+        con.close()
+
+        # Mock summarize_session to avoid real LLM calls
+        summarized = []
+        def fake_summarize(session_id, project, host, db_path=None, force=False):
+            summarized.append(session_id)
+            ep.update_session_summary_and_outcome(session_id, f"Summary for {session_id}", "completed")
+
+        with patch("agi_memory.summarizer.summarize_session", side_effect=fake_summarize):
+            count = hook_recover_sessions(self.project, "claude", db_path=self.db_path)
+            self.assertEqual(count, 3)
+            # Oldest first: ses_test_recover_1, 2, 3
+            self.assertEqual(summarized, ["ses_test_recover_1", "ses_test_recover_2", "ses_test_recover_3"])
+
+            # 4th remains unsummarized
+            sess4 = ep.get_session("ses_test_recover_4")
+            self.assertEqual(sess4.get("summary", ""), "")
+
+            # 1, 2, 3 now have summaries
+            for i in range(1, 4):
+                sess = ep.get_session(f"ses_test_recover_{i}")
+                self.assertIn("Summary for", sess.get("summary", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

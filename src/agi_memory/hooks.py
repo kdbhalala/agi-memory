@@ -258,6 +258,34 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
     except Exception:
         pass
 
+    # Recover missed sessions in background (close stale + summarize up to 3 unsummarized)
+    try:
+        try:
+            from agi_memory.summarizer import detect_host
+            from agi_memory.config import are_summaries_enabled
+        except ImportError:
+            from summarizer import detect_host
+            from config import are_summaries_enabled
+
+        resolved_host = detect_host()
+        if resolved_host and are_summaries_enabled():
+            env_pass = {}
+            if os.environ.get("AGI_MEMORY_DIR"):
+                env_pass["AGI_MEMORY_DIR"] = os.environ["AGI_MEMORY_DIR"]
+            if os.environ.get("AGI_MEMORY_DB"):
+                env_pass["AGI_MEMORY_DB"] = os.environ["AGI_MEMORY_DB"]
+            if os.environ.get("AGI_MEMORY_SUMMARIES"):
+                env_pass["AGI_MEMORY_SUMMARIES"] = os.environ["AGI_MEMORY_SUMMARIES"]
+            _spawn_detached([
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "recover-sessions",
+                "--project", proj,
+                "--host", resolved_host,
+            ], env_overrides=env_pass)
+    except Exception:
+        pass
+
     if not pinned_blocks and not recent_hits and not episodic_recap and not friction and not fresh_line:
         return
 
@@ -718,6 +746,46 @@ def hook_summarize_session(session_id: str, project: str, host: str) -> None:
         summarize_and_compress(session_id=session_id, project=project, host=host)
     except Exception:
         pass
+
+
+def hook_recover_sessions(project: str, host: str, db_path: Optional[Path | str] = None) -> int:
+    """Close stale sessions and generate summaries for up to 3 missed sessions."""
+    if _in_summarizer():
+        return 0
+    sys.path.insert(0, str(REPO_DIR))
+    try:
+        try:
+            from agi_memory.config import are_summaries_enabled
+            from agi_memory.layers.episodic_layer import EpisodicLayer
+            from agi_memory.summarizer import summarize_session, _log
+        except ImportError:
+            from config import are_summaries_enabled
+            from layers.episodic_layer import EpisodicLayer
+            from summarizer import summarize_session, _log
+
+        if not are_summaries_enabled():
+            return 0
+
+        ep = EpisodicLayer(db_path=db_path, project=project)
+        try:
+            closed = ep.close_stale_sessions(project=project)
+            if closed:
+                _log(f"Closed {closed} stale active session(s) during recovery for {project}")
+        except Exception as e:
+            _log(f"close_stale_sessions error in recovery: {e}")
+
+        unsummarized = ep.get_unsummarized_sessions(project=project, limit=3)
+        count = 0
+        for sess in unsummarized:
+            sid = sess["session_id"]
+            try:
+                summarize_session(sid, project, host, db_path=db_path, force=True)
+                count += 1
+            except Exception as e:
+                _log(f"Failed to recover summary for session {sid}: {e}")
+        return count
+    except Exception as e:
+        return 0
 
 
 def hook_vault_sync() -> None:
@@ -1767,6 +1835,10 @@ def main() -> None:
     p_summ.add_argument("--project", "-p", default="", help="Project name override")
     p_summ.add_argument("--host", default="", help="Host CLI name")
 
+    p_rec = subparsers.add_parser("recover-sessions", help="Detached helper to close stale and summarize missed sessions")
+    p_rec.add_argument("--project", "-p", default="", help="Project name override")
+    p_rec.add_argument("--host", default="", help="Host CLI name")
+
     subparsers.add_parser("pre-commit", help="Verify offline test suite before commit")
     
     p_post_commit = subparsers.add_parser("post-commit", help="Record commit summary to session memory")
@@ -1807,6 +1879,8 @@ def main() -> None:
         hook_session_end(getattr(args, "project", None), host=getattr(args, "host", None))
     elif args.action == "summarize-session":
         hook_summarize_session(getattr(args, "session_id", ""), getattr(args, "project", ""), getattr(args, "host", ""))
+    elif args.action == "recover-sessions":
+        hook_recover_sessions(getattr(args, "project", ""), getattr(args, "host", ""))
     elif args.action == "pre-commit":
         hook_pre_commit()
     elif args.action == "post-commit":

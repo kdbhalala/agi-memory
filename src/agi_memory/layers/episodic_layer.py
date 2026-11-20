@@ -577,6 +577,47 @@ class EpisodicLayer(MemoryLayer):
         except sqlite3.Error:
             return 0
 
+    def get_unsummarized_sessions(
+        self,
+        project: Optional[str] = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Find ended sessions for a project that have recorded activity but no summary, oldest first."""
+        proj = project or self.project
+        con = self._get_con(mode="ro")
+        cur = con.cursor()
+        try:
+            query = """
+                SELECT s.session_id FROM episodic_sessions s
+                WHERE s.status != 'active'
+                  AND (s.summary IS NULL OR TRIM(s.summary) = '' OR s.summary = 'SKIP')
+                  AND (
+                    EXISTS (SELECT 1 FROM episodic_events e WHERE e.session_id = s.session_id)
+                    OR (s.commits IS NOT NULL AND s.commits != '[]' AND s.commits != '')
+                    OR (s.touched_files IS NOT NULL AND s.touched_files != '[]' AND s.touched_files != '')
+                  )
+            """
+            params: list = []
+            if proj:
+                query += " AND s.project = ?"
+                params.append(proj)
+            query += " ORDER BY s.started_at ASC, s.id ASC LIMIT ?"
+            params.append(limit)
+
+            cur.execute(query, tuple(params))
+            sids = [r[0] for r in cur.fetchall()]
+        except sqlite3.Error:
+            sids = []
+        finally:
+            con.close()
+
+        results = []
+        for sid in sids:
+            sess = self.get_session(sid)
+            if sess:
+                results.append(sess)
+        return results
+
     def record_event(
         self,
         session_id: str,
