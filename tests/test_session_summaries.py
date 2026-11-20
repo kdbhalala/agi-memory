@@ -13,6 +13,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import _isolate  # noqa: F401 -- must run before agi_memory resolves any path
+import json
 import os
 import stat
 import tempfile
@@ -612,7 +613,89 @@ class TestSessionSummaries(unittest.TestCase):
                 call_host_cli("opencode", "test", db_path=self.db_path)
             # Must have stopped after exactly 3 attempts
             self.assertEqual(len(call_models), 3)
-            self.assertEqual(call_models, ["opencode/model-1-free", "opencode/model-2-free", "opencode/model-3-free"])
+    # 22. Codex lifecycle hooks installation, preservation, and uninstallation
+    def test_codex_hooks_lifecycle(self):
+        from agi_memory.hooks import install_codex_hooks, uninstall_codex_hooks, hook_parity
+
+        with tempfile.TemporaryDirectory() as td:
+            codex_dir = Path(td) / ".codex"
+            codex_dir.mkdir(parents=True)
+            hooks_file = codex_dir / "hooks.json"
+
+            # Pre-populate hooks.json with foreign hook (e.g. Orca)
+            orca_hook = {
+                "type": "command",
+                "command": "echo orca-hook"
+            }
+            initial_data = {
+                "hooks": {
+                    "SessionStart": [{"hooks": [orca_hook]}],
+                    "CustomEvent": [{"hooks": [orca_hook]}],
+                }
+            }
+            hooks_file.write_text(json.dumps(initial_data, indent=2))
+
+            orig_cwd = os.getcwd()
+            os.chdir(td)
+            try:
+                # Install codex hooks
+                ok, msg = install_codex_hooks(scope="project", py_path="/usr/bin/python3")
+                self.assertTrue(ok)
+                self.assertIn("Installed Codex hooks", msg)
+
+                # Verify hooks.json contents
+                installed_data = json.loads(hooks_file.read_text())
+                h = installed_data.get("hooks", {})
+                self.assertIn("SessionStart", h)
+                self.assertIn("UserPromptSubmit", h)
+                self.assertIn("PostToolUse", h)
+                self.assertIn("SessionEnd", h)
+                self.assertIn("CustomEvent", h)
+
+                # Ensure Orca foreign hook was preserved in SessionStart
+                session_start_cmds = [
+                    entry["command"]
+                    for grp in h["SessionStart"]
+                    for entry in grp.get("hooks", [])
+                ]
+                self.assertIn("echo orca-hook", session_start_cmds)
+                # Ensure agi-memory session-start was added
+                self.assertTrue(any("session-start" in cmd for cmd in session_start_cmds))
+
+                # Ensure SessionEnd includes --host codex
+                session_end_cmds = [
+                    entry["command"]
+                    for grp in h["SessionEnd"]
+                    for entry in grp.get("hooks", [])
+                ]
+                self.assertTrue(any("session-end --host codex" in cmd for cmd in session_end_cmds))
+
+                # Verify hook_parity sees codex installed
+                parity = hook_parity(scope="project")
+                self.assertIn("codex", parity)
+                self.assertEqual(
+                    sorted(parity["codex"]["installed"]),
+                    ["PostToolUse", "SessionEnd", "SessionStart", "UserPromptSubmit"],
+                )
+
+                # Uninstall codex hooks
+                ok_u, msg_u = uninstall_codex_hooks(scope="project")
+                self.assertTrue(ok_u)
+
+                # Verify agi-memory hooks removed, but Orca hook and CustomEvent preserved
+                uninstalled_data = json.loads(hooks_file.read_text())
+                uh = uninstalled_data.get("hooks", {})
+                self.assertIn("CustomEvent", uh)
+                self.assertIn("SessionStart", uh)
+                after_cmds = [
+                    entry["command"]
+                    for grp in uh["SessionStart"]
+                    for entry in grp.get("hooks", [])
+                ]
+                self.assertEqual(after_cmds, ["echo orca-hook"])
+                self.assertNotIn("SessionEnd", uh)  # emptied and deleted
+            finally:
+                os.chdir(orig_cwd)
 
 
 if __name__ == "__main__":

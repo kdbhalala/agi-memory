@@ -1161,6 +1161,89 @@ def uninstall_agy_hooks(scope: str = "user") -> Tuple[bool, str]:
     return True, f"Uninstalled Antigravity hooks from {hooks_path}"
 
 
+def install_codex_hooks(scope: str = "user", py_path: str = None) -> Tuple[bool, str]:
+    """Install SessionStart, UserPromptSubmit, PostToolUse, and SessionEnd hooks for OpenAI Codex."""
+    py = py_path or detect_python()
+    hooks_py = Path(__file__).resolve()
+    codex_home = Path(os.environ.get("CODEX_HOME", "")).expanduser() if os.environ.get("CODEX_HOME") else Path.home() / ".codex"
+    hooks_path = codex_home / "hooks.json" if scope == "user" else Path.cwd() / ".codex" / "hooks.json"
+
+    data: Dict[str, Any] = {}
+    if hooks_path.exists():
+        try:
+            data = json.loads(hooks_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+
+    hooks = data.setdefault("hooks", {})
+
+    cmd_start = f'"{py}" "{hooks_py}" session-start'
+    cmd_prompt = f'"{py}" "{hooks_py}" user-prompt-submit'
+    cmd_post = f'"{py}" "{hooks_py}" post-tool'
+    cmd_end = f'"{py}" "{hooks_py}" session-end --host codex'
+
+    def _is_memory_hook(entry: Dict[str, Any]) -> bool:
+        return any(
+            "hooks.py" in h.get("command", "")
+            or "agent-memory" in h.get("command", "")
+            or "agi-memory" in h.get("command", "")
+            or "agi-hooks" in h.get("command", "")
+            for h in entry.get("hooks", [])
+        )
+
+    # Purge existing memory hooks for cleanliness, preserving all other entries (Orca, user hooks)
+    for ev in ("SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"):
+        if ev in hooks:
+            hooks[ev] = [e for e in hooks[ev] if not _is_memory_hook(e)]
+
+    def _ensure_hook(event: str, cmd: str):
+        event_list = hooks.setdefault(event, [])
+        new_entry: Dict[str, Any] = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": cmd
+                }
+            ]
+        }
+        event_list.append(new_entry)
+
+    _ensure_hook("SessionStart", cmd_start)
+    _ensure_hook("UserPromptSubmit", cmd_prompt)
+    _ensure_hook("PostToolUse", cmd_post)
+    _ensure_hook("SessionEnd", cmd_end)
+
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+    hooks_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return True, f"Installed Codex hooks in {hooks_path}"
+
+
+def uninstall_codex_hooks(scope: str = "user") -> Tuple[bool, str]:
+    codex_home = Path(os.environ.get("CODEX_HOME", "")).expanduser() if os.environ.get("CODEX_HOME") else Path.home() / ".codex"
+    hooks_path = codex_home / "hooks.json" if scope == "user" else Path.cwd() / ".codex" / "hooks.json"
+    if not hooks_path.exists():
+        return True, "No hooks.json file found"
+    try:
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "Failed to parse hooks.json"
+
+    hooks = data.get("hooks", {})
+    for event in list(hooks.keys()):
+        cleaned = []
+        for entry in hooks[event]:
+            has_agent_mem = any("hooks.py" in h.get("command", "") or "agent-memory" in h.get("command", "") for h in entry.get("hooks", []))
+            if not has_agent_mem:
+                cleaned.append(entry)
+        if cleaned:
+            hooks[event] = cleaned
+        else:
+            del hooks[event]
+
+    hooks_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return True, f"Uninstalled Codex hooks from {hooks_path}"
+
+
 # ============================================================================
 # OpenCode Plugin (OpenCode has no native hook config; hooks ship as a plugin)
 # ============================================================================
@@ -1496,6 +1579,7 @@ def install_all_hooks(scope: str = "user", py_path: str = None) -> Dict[str, Tup
     results["claude"] = install_claude_hooks(scope=scope, py_path=py)
     results["agy"] = install_agy_hooks(scope=scope, py_path=py)
     results["opencode"] = install_opencode_plugin(scope=scope, py_path=py)
+    results["codex"] = install_codex_hooks(scope=scope, py_path=py)
 
     git_res = install_git_hooks(py_path=py)
     if git_res[0]:
@@ -1509,6 +1593,7 @@ def uninstall_all_hooks(scope: str = "user") -> Dict[str, Tuple[bool, str]]:
     results["claude"] = uninstall_claude_hooks(scope=scope)
     results["agy"] = uninstall_agy_hooks(scope=scope)
     results["opencode"] = uninstall_opencode_plugin(scope=scope)
+    results["codex"] = uninstall_codex_hooks(scope=scope)
     results["git"] = uninstall_git_hooks()
     return results
 
@@ -1544,6 +1629,11 @@ HOOK_SURFACES: Dict[str, Dict[str, Any]] = {
         "point_of_action": "PostToolUse (plugin hook)",
         "events": ("session-start", "user-prompt-submit", "pre-compact", "session-end",
                    "post-tool"),
+    },
+    "codex": {
+        "config": "hooks.json (SessionStart, UserPromptSubmit, PostToolUse, SessionEnd)",
+        "point_of_action": "PostToolUse",
+        "events": ("SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd"),
     },
 }
 
@@ -1609,6 +1699,15 @@ def hook_parity(scope: str = "user") -> Dict[str, Any]:
         installed = ["STALE: not the module shape the OpenCode loader accepts -- reinstall"]
     report["opencode"] = {**HOOK_SURFACES["opencode"], "config_path": str(plugin),
                           "installed": installed}
+
+    codex_home = Path(os.environ.get("CODEX_HOME", "")).expanduser() if os.environ.get("CODEX_HOME") else Path.home() / ".codex"
+    codex = codex_home / "hooks.json" if scope == "user" else Path.cwd() / ".codex" / "hooks.json"
+    try:
+        codex_events = _memory_hook_events(json.loads(codex.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        codex_events = set()
+    report["codex"] = {**HOOK_SURFACES["codex"], "config_path": str(codex),
+                       "installed": sorted(codex_events)}
     return report
 
 
@@ -1730,6 +1829,8 @@ def main() -> None:
                     ok, msg = install_agy_hooks(scope=args.scope, py_path=args.python)
                 elif t == "opencode":
                     ok, msg = install_opencode_plugin(scope=args.scope, py_path=args.python)
+                elif t in ("codex", "openai-codex"):
+                    ok, msg = install_codex_hooks(scope=args.scope, py_path=args.python)
                 elif t == "git":
                     ok, msg = install_git_hooks(py_path=args.python)
                 else:
@@ -1749,6 +1850,8 @@ def main() -> None:
                     ok, msg = uninstall_agy_hooks(scope=args.scope)
                 elif t == "opencode":
                     ok, msg = uninstall_opencode_plugin(scope=args.scope)
+                elif t in ("codex", "openai-codex"):
+                    ok, msg = uninstall_codex_hooks(scope=args.scope)
                 elif t == "git":
                     ok, msg = uninstall_git_hooks()
                 else:
