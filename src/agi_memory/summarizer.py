@@ -29,6 +29,7 @@ try:
         are_summaries_enabled,
         get_default_db,
         hidden_subprocess_kwargs,
+        resolve_summary_model,
     )
     from agi_memory.layers.episodic_layer import EpisodicLayer, OUTCOMES
     from agi_memory.redact import redact
@@ -39,6 +40,7 @@ except ImportError:
             are_summaries_enabled,
             get_default_db,
             hidden_subprocess_kwargs,
+            resolve_summary_model,
         )
         from layers.episodic_layer import EpisodicLayer, OUTCOMES
         from redact import redact
@@ -48,6 +50,7 @@ except ImportError:
             are_summaries_enabled,
             get_default_db,
             hidden_subprocess_kwargs,
+            resolve_summary_model,
         )
         from .layers.episodic_layer import EpisodicLayer, OUTCOMES
         from .redact import redact
@@ -150,6 +153,7 @@ def build_summarizer_cmd(
     prompt: str,
     output_file: Optional[str] = None,
     cwd: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Tuple[List[str], bool, Optional[str]]:
     """Build the command args, stdin requirement, and output file path.
 
@@ -158,26 +162,28 @@ def build_summarizer_cmd(
     """
     bin_name = host
     bin_path = resolve_host_binary(bin_name)
+    m = model if model is not None else resolve_summary_model(host)
 
     if host == "claude":
-        # claude -p --model haiku --tools "" --mcp-config '{"mcpServers":{}}'
+        # claude -p [--model <model>] --tools "" --mcp-config '{"mcpServers":{}}'
         # --strict-mcp-config --setting-sources "" --no-session-persistence
-        cmd = [
-            bin_path,
-            "-p",
-            "--model", "haiku",
+        cmd = [bin_path, "-p"]
+        if m:
+            cmd.extend(["--model", m])
+        cmd.extend([
             "--tools", "",
             "--allowedTools", "",
             "--mcp-config", '{"mcpServers":{}}',
             "--strict-mcp-config",
             "--setting-sources", "",
             "--no-session-persistence",
-        ]
+        ])
         return cmd, True, None
 
     if host == "codex":
         # codex exec --sandbox read-only --ignore-user-config --ephemeral
-        # --skip-git-repo-check -c shell_environment_policy.inherit=none -o <file> -
+        # --skip-git-repo-check -c shell_environment_policy.inherit=none
+        # [-m <model> -c model_reasoning_effort="low"] -o <file> -
         out = output_file or "codex_out.txt"
         cmd = [
             bin_path,
@@ -187,58 +193,85 @@ def build_summarizer_cmd(
             "--ephemeral",
             "--skip-git-repo-check",
             "-c", "shell_environment_policy.inherit=none",
-            "-o", out,
-            "-",
         ]
+        if m:
+            cmd.extend(["-m", m, "-c", 'model_reasoning_effort="low"'])
+        cmd.extend(["-o", out, "-"])
         if cwd:
             cmd.extend(["-C", cwd])
         return cmd, True, out
 
     if host.startswith("opencode"):
-        # opencode run --agent plan --archived --format default
-        # --agent plan blocks tools/shell/edits completely
+        # opencode run --standalone --agent plan --archived --format default [-m <model>]
+        # --standalone ensures a private server that inherits environment and does not leak sessions.
         cmd = [
             bin_path,
             "run",
+            "--standalone",
             "--agent", "plan",
             "--archived",
             "--format", "default",
         ]
+        if m:
+            cmd.extend(["-m", m])
         return cmd, True, None
 
     if host == "agy":
-        # agy --mode plan --sandbox --model gemini-3.8-flash-low --effort low --output-format text -p <prompt>
+        # agy --mode plan --sandbox [--model <model> --effort low] --output-format text -p <prompt>
         # --mode plan and --sandbox prevent tool execution and file modifications.
-        # --model gemini-3.8-flash-low --effort low ensures fast, cheap responses (<20s).
         # NOTE: Do NOT pass --disable-slash-commands, as it disables --mode plan.
         cmd = [
             bin_path,
             "--mode", "plan",
             "--sandbox",
-            "--model", "gemini-3.8-flash-low",
-            "--effort", "low",
-            "--output-format", "text",
-            "-p", prompt,
         ]
+        if m:
+            cmd.extend(["--model", m, "--effort", "low"])
+        cmd.extend(["--output-format", "text", "-p", prompt])
         return cmd, False, None
 
     raise ValueError(f"Unknown host CLI: {host}")
 
 
-def call_host_cli(host: str, prompt: str, timeout: int = 120) -> str:
+def _exec_host_cli(host: str, prompt: str, model: Optional[str] = None, timeout: int = 120) -> str:
     """Execute host CLI in an isolated temp directory with recursion guards."""
-    if not are_summaries_enabled():
-        raise RuntimeError("Session summaries are disabled via configuration (AGI_MEMORY_SUMMARIES=0)")
-
     with tempfile.TemporaryDirectory(prefix="agi-summarizer-") as temp_dir:
         out_file_path = os.path.join(temp_dir, "model_output.txt")
         cmd, use_stdin, out_file = build_summarizer_cmd(
-            host, prompt, output_file=out_file_path, cwd=temp_dir
+            host, prompt, output_file=out_file_path, cwd=temp_dir, model=model
         )
 
         env = dict(os.environ)
         # Critical recursion guard: hooks must exit immediately when this is set
         env["AGI_MEMORY_SUMMARIZER"] = "1"
+
+        if host.startswith("opencode"):
+            # Provide isolated configuration denying bash, edit, write, webfetch tools
+            # and stripping all MCP servers and plugins to prevent tool execution
+            # and background server session leaks.
+            isolated_cfg = {
+                "$schema": "https://opencode.ai/config.json",
+                "permission": {
+                    "bash": "deny",
+                    "edit": "deny",
+                    "write": "deny",
+                    "webfetch": "deny",
+                },
+                "plugins": [],
+                "mcp": {},
+                "instructions": [],
+            }
+            cfg_file = os.path.join(temp_dir, "opencode.json")
+            try:
+                with open(cfg_file, "w", encoding="utf-8") as f:
+                    json.dump(isolated_cfg, f)
+            except Exception:
+                pass
+            env["OPENCODE_CONFIG"] = cfg_file
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(isolated_cfg)
+            env["OPENCODE_CONFIG_DIR"] = temp_dir
+            env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+            env["OPENCODE_CONFIG_PROJECT_DISABLE"] = "1"
 
         # Strip parent session identity markers
         for var in (
@@ -291,6 +324,25 @@ def call_host_cli(host: str, prompt: str, timeout: int = 120) -> str:
 
         raw = (proc.stdout or "").strip()
         return raw
+
+
+def call_host_cli(host: str, prompt: str, timeout: int = 120) -> str:
+    """Execute host CLI in an isolated temp directory with recursion guards.
+
+    If a pinned model is rejected by the CLI (unknown model / not available on account),
+    retries once without the model flag and logs it.
+    """
+    if not are_summaries_enabled():
+        raise RuntimeError("Session summaries are disabled via configuration (AGI_MEMORY_SUMMARIES=0)")
+
+    model = resolve_summary_model(host)
+    try:
+        return _exec_host_cli(host, prompt, model=model, timeout=timeout)
+    except Exception as err:
+        if model:
+            _log(f"Model '{model}' failed for host {host}, retrying once without model flag: {err}")
+            return _exec_host_cli(host, prompt, model="", timeout=timeout)
+        raise
 
 
 # ─── Prompt Building & Response Parsing ──────────────────────────────────────

@@ -17,10 +17,12 @@ import os
 import stat
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
+from agi_memory.config import DEFAULT_SUMMARY_MODELS, resolve_summary_model
 from agi_memory.layers.episodic_layer import EpisodicLayer
 from agi_memory.summarizer import (
+    build_summarizer_cmd,
     build_summary_prompt,
     call_host_cli,
     compress_rollups,
@@ -364,7 +366,148 @@ class TestSessionSummaries(unittest.TestCase):
         stored = ep.get_session(sid)
         self.assertEqual(stored["summary"], "Implemented user profile view and controller.")
 
+    # 12. Default model flag present per host
+    def test_default_model_flag_per_host(self):
+        # Claude defaults to haiku
+        cmd_claude, _, _ = build_summarizer_cmd("claude", "test")
+        self.assertIn("--model", cmd_claude)
+        self.assertEqual(cmd_claude[cmd_claude.index("--model") + 1], "haiku")
+
+        # Codex defaults to gpt-6-luna with low reasoning effort
+        cmd_codex, _, _ = build_summarizer_cmd("codex", "test")
+        self.assertIn("-m", cmd_codex)
+        self.assertEqual(cmd_codex[cmd_codex.index("-m") + 1], "gpt-6-luna")
+        self.assertIn('model_reasoning_effort="low"', cmd_codex)
+
+        # Agy defaults to gemini-3.8-flash-low with low effort
+        cmd_agy, _, _ = build_summarizer_cmd("agy", "test")
+        self.assertIn("--model", cmd_agy)
+        self.assertEqual(cmd_agy[cmd_agy.index("--model") + 1], "gemini-3.8-flash-low")
+        self.assertIn("--effort", cmd_agy)
+        self.assertEqual(cmd_agy[cmd_agy.index("--effort") + 1], "low")
+
+        # OpenCode / OpenCode2 do not pin a model by default
+        cmd_opencode, _, _ = build_summarizer_cmd("opencode", "test")
+        self.assertNotIn("-m", cmd_opencode)
+        self.assertNotIn("--model", cmd_opencode)
+        self.assertIn("--standalone", cmd_opencode)
+
+        cmd_opencode2, _, _ = build_summarizer_cmd("opencode2", "test")
+        self.assertNotIn("-m", cmd_opencode2)
+        self.assertNotIn("--model", cmd_opencode2)
+        self.assertIn("--standalone", cmd_opencode2)
+
+    # 13. Environment variable model override per host
+    def test_env_model_override(self):
+        with patch.dict(os.environ, {
+            "AGI_MEMORY_SUMMARY_MODEL_CODEX": "gpt-6-custom",
+            "AGI_MEMORY_SUMMARY_MODEL_OPENCODE": "opencode/free-custom",
+            "AGI_MEMORY_SUMMARY_MODEL_CLAUDE": "claude-3-5-haiku-20241022",
+            "AGI_MEMORY_SUMMARY_MODEL_AGY": "gemini-3.8-pro",
+        }):
+            self.assertEqual(resolve_summary_model("codex"), "gpt-6-custom")
+            self.assertEqual(resolve_summary_model("opencode"), "opencode/free-custom")
+            self.assertEqual(resolve_summary_model("opencode2"), "opencode/free-custom")
+            self.assertEqual(resolve_summary_model("claude"), "claude-3-5-haiku-20241022")
+            self.assertEqual(resolve_summary_model("agy"), "gemini-3.8-pro")
+
+            cmd_codex, _, _ = build_summarizer_cmd("codex", "test")
+            self.assertEqual(cmd_codex[cmd_codex.index("-m") + 1], "gpt-6-custom")
+
+            cmd_opencode, _, _ = build_summarizer_cmd("opencode", "test")
+            self.assertIn("-m", cmd_opencode)
+            self.assertEqual(cmd_opencode[cmd_opencode.index("-m") + 1], "opencode/free-custom")
+
+            cmd_claude, _, _ = build_summarizer_cmd("claude", "test")
+            self.assertEqual(cmd_claude[cmd_claude.index("--model") + 1], "claude-3-5-haiku-20241022")
+
+            cmd_agy, _, _ = build_summarizer_cmd("agy", "test")
+            self.assertEqual(cmd_agy[cmd_agy.index("--model") + 1], "gemini-3.8-pro")
+
+    # 14. Empty model override drops model flag
+    def test_empty_model_override_drops_flag(self):
+        with patch.dict(os.environ, {
+            "AGI_MEMORY_SUMMARY_MODEL_CODEX": "",
+            "AGI_MEMORY_SUMMARY_MODEL_CLAUDE": "",
+            "AGI_MEMORY_SUMMARY_MODEL_AGY": "",
+        }):
+            self.assertEqual(resolve_summary_model("codex"), "")
+            self.assertEqual(resolve_summary_model("claude"), "")
+            self.assertEqual(resolve_summary_model("agy"), "")
+
+            cmd_codex, _, _ = build_summarizer_cmd("codex", "test")
+            self.assertNotIn("-m", cmd_codex)
+            self.assertNotIn("model_reasoning_effort", str(cmd_codex))
+
+            cmd_claude, _, _ = build_summarizer_cmd("claude", "test")
+            self.assertNotIn("--model", cmd_claude)
+
+            cmd_agy, _, _ = build_summarizer_cmd("agy", "test")
+            self.assertNotIn("--model", cmd_agy)
+            self.assertNotIn("--effort", cmd_agy)
+
+    # 15. Retry without model flag on failure
+    def test_retry_without_model_on_failure(self):
+        call_log = []
+
+        def fake_exec(host, prompt, model=None, timeout=120):
+            call_log.append(model)
+            if model == "gpt-6-luna":
+                raise RuntimeError("Model 'gpt-6-luna' not available on this account")
+            return "SUMMARY: Success with default model.\nOUTCOME: completed"
+
+        with patch("agi_memory.summarizer._exec_host_cli", side_effect=fake_exec):
+            res = call_host_cli("codex", "test prompt")
+            self.assertIn("Success with default model", res)
+            # Must have called first with pinned model, then retried with empty model
+            self.assertEqual(call_log, ["gpt-6-luna", ""])
+
+        # When retry also fails, exception is raised
+        def fail_always(host, prompt, model=None, timeout=120):
+            raise RuntimeError("Fatal CLI failure")
+
+        with patch("agi_memory.summarizer._exec_host_cli", side_effect=fail_always):
+            with self.assertRaises(RuntimeError) as ctx:
+                call_host_cli("codex", "test prompt")
+            self.assertIn("Fatal CLI failure", str(ctx.exception))
+
+    # 16. OpenCode permission isolation config denies shell/edit/webfetch
+    def test_opencode_permission_isolation(self):
+        recorded_env = {}
+        recorded_cfg = {}
+
+        def mock_subprocess_run(cmd, **kwargs):
+            env = kwargs.get("env", {})
+            recorded_env.update(env)
+            cfg_path = env.get("OPENCODE_CONFIG")
+            if cfg_path and os.path.exists(cfg_path):
+                import json
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    recorded_cfg.update(json.load(f))
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.stdout = "SUMMARY: OpenCode isolated summary.\nOUTCOME: completed\n"
+            mock_proc.stderr = ""
+            return mock_proc
+
+        with patch("subprocess.run", side_effect=mock_subprocess_run):
+            from agi_memory.summarizer import _exec_host_cli
+            out = _exec_host_cli("opencode", "test prompt")
+            self.assertIn("OpenCode isolated summary", out)
+
+            # Check that isolated config and env guards were passed
+            self.assertEqual(recorded_env.get("AGI_MEMORY_SUMMARIZER"), "1")
+            self.assertEqual(recorded_env.get("OPENCODE_DISABLE_PROJECT_CONFIG"), "1")
+            self.assertEqual(recorded_env.get("OPENCODE_CONFIG_PROJECT_DISABLE"), "1")
+            self.assertEqual(recorded_cfg.get("permission", {}).get("bash"), "deny")
+            self.assertEqual(recorded_cfg.get("permission", {}).get("edit"), "deny")
+            self.assertEqual(recorded_cfg.get("permission", {}).get("write"), "deny")
+            self.assertEqual(recorded_cfg.get("permission", {}).get("webfetch"), "deny")
+            self.assertEqual(recorded_cfg.get("plugins"), [])
+            self.assertEqual(recorded_cfg.get("mcp"), {})
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

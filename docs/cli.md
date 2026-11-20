@@ -75,6 +75,12 @@ agi-memory outcome completed        # or abandoned | blocked | superseded
 # At session-end, agi-memory invokes the session's native CLI (claude, codex, opencode, agy)
 # detached to produce a 1-sentence summary and infer outcome. Prompts and summaries are redacted.
 # Data goes strictly to that CLI's provider under its own account.
+# Default cheapest models: claude (haiku), codex (gpt-6-luna), agy (gemini-3.8-flash-low),
+# opencode (unpinned CLI default / free opencode/*-free model).
+# Override any host model via environment variable:
+export AGI_MEMORY_SUMMARY_MODEL_CODEX="gpt-6-luna"
+export AGI_MEMORY_SUMMARY_MODEL_OPENCODE="openai/gpt-4o-mini"
+# Note: Free opencode/*-free models may be logged/used for training by providers; set an override for paid models.
 # To disable automated summaries globally, set:
 export AGI_MEMORY_SUMMARIES=0
 ```
