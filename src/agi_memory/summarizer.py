@@ -148,6 +148,65 @@ def resolve_host_binary(host: str) -> str:
     return which_bin if which_bin else host
 
 
+def resolve_opencode_summary_model() -> str:
+    """Resolve the model to use for opencode / opencode2 summarization.
+
+    Resolution order:
+    1. Environment variable AGI_MEMORY_SUMMARY_MODEL_OPENCODE (or AGI_MEMORY_SUMMARY_MODEL_OPENCODE2)
+    2. small_model from ~/.config/opencode/opencode.json or .jsonc (preferred for cheap tasks)
+    3. model from ~/.config/opencode/opencode.json or .jsonc
+    4. First available *-free model from `opencode models` at runtime (e.g. opencode/beam-free)
+    """
+    if "AGI_MEMORY_SUMMARY_MODEL_OPENCODE" in os.environ:
+        return os.environ["AGI_MEMORY_SUMMARY_MODEL_OPENCODE"].strip()
+    if "AGI_MEMORY_SUMMARY_MODEL_OPENCODE2" in os.environ:
+        return os.environ["AGI_MEMORY_SUMMARY_MODEL_OPENCODE2"].strip()
+
+    # Check user global config (~/.config/opencode/opencode.json or .jsonc)
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", "").strip() or Path.home() / ".config") / "opencode"
+    for filename in ("opencode.json", "opencode.jsonc"):
+        cfg_file = config_dir / filename
+        if cfg_file.is_file():
+            try:
+                raw = cfg_file.read_text(encoding="utf-8")
+                clean = re.sub(r"//.*?\n|/\*.*?\*/", "", raw, flags=re.S)
+                cfg = json.loads(clean)
+                small_m = (cfg.get("small_model") or cfg.get("smallModel") or "").strip()
+                if small_m:
+                    return small_m
+                m = (cfg.get("model") or "").strip()
+                if m:
+                    return m
+            except Exception as e:
+                _log(f"Failed to read model from {cfg_file}: {e}")
+
+    # Discover dynamically from `opencode models` at runtime
+    bin_path = resolve_host_binary("opencode")
+    try:
+        r = subprocess.run(
+            [bin_path, "models"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **hidden_subprocess_kwargs(),
+        )
+        if r.returncode == 0 and r.stdout:
+            for line in r.stdout.splitlines():
+                cand = line.strip()
+                if cand.startswith("opencode/") and cand.endswith("-free"):
+                    _log(f"Discovered runtime OpenCode free model: {cand}")
+                    return cand
+            for line in r.stdout.splitlines():
+                cand = line.strip()
+                if cand.endswith("-free"):
+                    _log(f"Discovered runtime free model: {cand}")
+                    return cand
+    except Exception as e:
+        _log(f"Failed to query opencode models: {e}")
+
+    return "opencode/tidepool-alpha-free"
+
+
 def build_summarizer_cmd(
     host: str,
     prompt: str,
@@ -162,7 +221,12 @@ def build_summarizer_cmd(
     """
     bin_name = host
     bin_path = resolve_host_binary(bin_name)
-    m = model if model is not None else resolve_summary_model(host)
+    if model is not None:
+        m = model
+    elif host.startswith("opencode"):
+        m = resolve_opencode_summary_model()
+    else:
+        m = resolve_summary_model(host)
 
     if host == "claude":
         # claude -p [--model <model>] --tools "" --mcp-config '{"mcpServers":{}}'
@@ -335,7 +399,9 @@ def call_host_cli(host: str, prompt: str, timeout: int = 120) -> str:
     if not are_summaries_enabled():
         raise RuntimeError("Session summaries are disabled via configuration (AGI_MEMORY_SUMMARIES=0)")
 
-    model = resolve_summary_model(host)
+    model = (
+        resolve_opencode_summary_model() if host.startswith("opencode") else resolve_summary_model(host)
+    )
     try:
         return _exec_host_cli(host, prompt, model=model, timeout=timeout)
     except Exception as err:
@@ -386,9 +452,11 @@ def build_summary_prompt(
         "You are an assistant summarizing a coding session for cross-session developer memory.",
         "",
         "Instructions:",
-        "1. If the session only contains greetings, orientation, question answering with no changes,",
-        "   or made no meaningful progress, return exactly the word SKIP and nothing else.",
-        "2. Otherwise, write ONE concise, specific sentence summarizing what was accomplished",
+        "1. Commits, edited files, or executed commands ALWAYS count as meaningful work -- NEVER return SKIP",
+        "   if there are any commits, touched files, or recorded commands.",
+        "   Return exactly the word SKIP ONLY if there are NO commits, NO edited files, and NO commands",
+        "   (e.g., pure greeting or orientation without code changes or actions).",
+        "2. Write ONE concise, specific sentence summarizing what was accomplished",
         "   (name specific files, modules, issue/PR numbers, or commands).",
         "   If the session was blocked, incomplete, abandoned, or waiting on human action,",
         "   you MUST include that status in the sentence.",
@@ -398,7 +466,7 @@ def build_summary_prompt(
         "Output Format:",
         "SUMMARY: <one sentence summary>",
         "OUTCOME: <completed|blocked|abandoned|in-progress>",
-        "(Or output SKIP if no meaningful work occurred)",
+        "(Or output SKIP ONLY if there are zero commits, zero edits, and zero commands)",
         "",
         "--- Session Activity ---",
     ]
@@ -539,12 +607,31 @@ def summarize_session(
             except Exception:
                 pass
 
+    session_commits = list(commits)
+    session_edits = []
+    session_commands = []
+    for ev in events:
+        etype = ev.get("event_type", "")
+        esumm = ev.get("summary") or ""
+        edet = ev.get("details")
+        if etype == "commit":
+            c_desc = esumm or (edet if isinstance(edet, str) else "")
+            if c_desc and c_desc not in session_commits:
+                session_commits.append(c_desc)
+        elif etype in ("edit", "file_edit", "write"):
+            f_desc = edet if (isinstance(edet, str) and not edet.startswith("{")) else esumm
+            if f_desc and f_desc not in session_edits:
+                session_edits.append(f_desc)
+        elif etype in ("command", "cmd", "bash"):
+            if esumm and esumm not in session_commands:
+                session_commands.append(esumm)
+
     tail = read_transcript_tail(transcript_path)
     prompt = build_summary_prompt(
         goal=goal,
         branch=branch,
-        commits=commits,
-        touched_files=touched,
+        commits=session_commits or commits,
+        touched_files=session_edits or touched,
         events=events,
         transcript_tail=tail,
     )
@@ -561,6 +648,23 @@ def summarize_session(
     if (not summary or summary == "SKIP") and existing_summary and existing_summary != "SKIP":
         _log(f"Preserving existing summary for session {sid}; ignoring SKIP from later turn")
         summary = existing_summary
+    elif (not summary or summary == "SKIP") and (session_commits or commits or session_edits or session_commands):
+        # Commits, edits or commands always count as work -- never SKIP
+        all_commits = session_commits or commits
+        all_files = session_edits or touched
+        det_parts = []
+        if all_commits:
+            det_parts.append(f"Commits: {', '.join(all_commits[:3])}")
+        if all_files:
+            det_parts.append(f"Files: {', '.join(all_files[:5])}")
+        if session_commands and not all_commits and not all_files:
+            det_parts.append(f"Commands: {', '.join(session_commands[:3])}")
+        if goal:
+            det_parts.insert(0, goal)
+        summary = " | ".join(det_parts) if det_parts else goal or "Completed session tasks."
+        if not inferred_outcome:
+            inferred_outcome = "completed"
+        _log(f"Model returned SKIP for session {sid} with real work; fell back to deterministic summary: {summary}")
 
     current_outcome = (sess.get("outcome") or "unknown").lower()
     # Outcome is ONLY set if currently unknown (an explicit call always wins)

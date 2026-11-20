@@ -29,6 +29,7 @@ from agi_memory.summarizer import (
     detect_host,
     match_host_binary,
     parse_summary_response,
+    resolve_opencode_summary_model,
     summarize_session,
 )
 from agi_memory.hooks import (
@@ -387,15 +388,20 @@ class TestSessionSummaries(unittest.TestCase):
         self.assertEqual(cmd_agy[cmd_agy.index("--effort") + 1], "low")
 
         # OpenCode / OpenCode2 do not pin a model by default
+        # OpenCode / OpenCode2 dynamically discover the runtime free model
         cmd_opencode, _, _ = build_summarizer_cmd("opencode", "test")
-        self.assertNotIn("-m", cmd_opencode)
-        self.assertNotIn("--model", cmd_opencode)
+        self.assertIn("-m", cmd_opencode)
+        self.assertTrue(cmd_opencode[cmd_opencode.index("-m") + 1].endswith("-free"))
         self.assertIn("--standalone", cmd_opencode)
 
         cmd_opencode2, _, _ = build_summarizer_cmd("opencode2", "test")
-        self.assertNotIn("-m", cmd_opencode2)
-        self.assertNotIn("--model", cmd_opencode2)
+        self.assertIn("-m", cmd_opencode2)
+        self.assertTrue(cmd_opencode2[cmd_opencode2.index("-m") + 1].endswith("-free"))
         self.assertIn("--standalone", cmd_opencode2)
+
+        # When model="" is explicitly passed, no -m flag is included
+        cmd_opencode_empty, _, _ = build_summarizer_cmd("opencode", "test", model="")
+        self.assertNotIn("-m", cmd_opencode_empty)
 
     # 13. Environment variable model override per host
     def test_env_model_override(self):
@@ -430,10 +436,12 @@ class TestSessionSummaries(unittest.TestCase):
             "AGI_MEMORY_SUMMARY_MODEL_CODEX": "",
             "AGI_MEMORY_SUMMARY_MODEL_CLAUDE": "",
             "AGI_MEMORY_SUMMARY_MODEL_AGY": "",
+            "AGI_MEMORY_SUMMARY_MODEL_OPENCODE": "",
         }):
             self.assertEqual(resolve_summary_model("codex"), "")
             self.assertEqual(resolve_summary_model("claude"), "")
             self.assertEqual(resolve_summary_model("agy"), "")
+            self.assertEqual(resolve_opencode_summary_model(), "")
 
             cmd_codex, _, _ = build_summarizer_cmd("codex", "test")
             self.assertNotIn("-m", cmd_codex)
@@ -445,6 +453,9 @@ class TestSessionSummaries(unittest.TestCase):
             cmd_agy, _, _ = build_summarizer_cmd("agy", "test")
             self.assertNotIn("--model", cmd_agy)
             self.assertNotIn("--effort", cmd_agy)
+
+            cmd_opencode, _, _ = build_summarizer_cmd("opencode", "test")
+            self.assertNotIn("-m", cmd_opencode)
 
     # 15. Retry without model flag on failure
     def test_retry_without_model_on_failure(self):
@@ -505,6 +516,47 @@ class TestSessionSummaries(unittest.TestCase):
             self.assertEqual(recorded_cfg.get("permission", {}).get("webfetch"), "deny")
             self.assertEqual(recorded_cfg.get("plugins"), [])
             self.assertEqual(recorded_cfg.get("mcp"), {})
+
+    # 17. Model returns SKIP on session with real work -> falls back to deterministic summary
+    def test_skip_fallback_to_deterministic_summary(self):
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        sess = ep.start_session(project=self.project, goal="Fix authentication bug")
+        sid = sess["session_id"]
+        ep.record_event(sid, "commit", "fix: null check in login", project=self.project)
+        ep.record_event(sid, "file_edit", "src/auth.py", project=self.project)
+
+        # Model returns SKIP despite real work (commits and edits)
+        with patch("agi_memory.summarizer.call_host_cli", return_value="SKIP"):
+            res = summarize_session(sid, self.project, "codex", db_path=self.db_path, force=True)
+            self.assertIsNotNone(res)
+            # Must NOT store SKIP -- should fall back to deterministic summary
+            self.assertNotEqual(res["summary"], "SKIP")
+            self.assertIn("Fix authentication bug", res["summary"])
+            self.assertIn("fix: null check in login", res["summary"])
+
+            stored = ep.get_session(sid)
+            self.assertNotEqual(stored["summary"], "SKIP")
+            self.assertEqual(stored["summary"], res["summary"])
+
+    # 18. OpenCode config resolution preferring small_model over model
+    def test_opencode_config_model_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg_dir = Path(td) / "opencode"
+            cfg_dir.mkdir(parents=True)
+            cfg_file = cfg_dir / "opencode.jsonc"
+            cfg_file.write_text('// config comment\n{"small_model": "opencode/small-model-test", "model": "opencode/large-model"}\n')
+
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": td}):
+                from agi_memory.summarizer import resolve_opencode_summary_model
+                m = resolve_opencode_summary_model()
+                self.assertEqual(m, "opencode/small-model-test")
+
+            # Without small_model, falls back to model
+            cfg_file.write_text('{"model": "opencode/fallback-model"}\n')
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": td}):
+                from agi_memory.summarizer import resolve_opencode_summary_model
+                m = resolve_opencode_summary_model()
+                self.assertEqual(m, "opencode/fallback-model")
 
 
 if __name__ == "__main__":
