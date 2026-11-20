@@ -838,6 +838,32 @@ class TestSessionSummaries(unittest.TestCase):
             self.assertEqual(len(res), len(init_command.HANDOFF_PROJECT_TARGETS))
             self.assertTrue(all(v.startswith("written") for v in res.values()))
 
+    # 28. Current time in user-prompt-submit hook
+    def test_prompt_clock(self):
+        from agi_memory.hooks import format_prompt_clock, hook_user_prompt_submit
+        import io, re
+
+        clock = format_prompt_clock()
+        self.assertTrue(re.match(r"^\[\d{2}:\d{2}\s+[A-Za-z0-9+-]+\s+--\s+[^\]]+\]$", clock),
+                        f"Clock '{clock}' did not match expected shape [HH:MM TZ -- user]")
+
+        # On by default in hook_user_prompt_submit
+        with patch.dict(os.environ, {"AGI_MEMORY_DB": str(self.db_path)}), \
+             patch("agi_memory.hooks._read_hook_payload", return_value={"prompt": "hello world"}), \
+             patch("sys.stdout", new=io.StringIO()) as fake_out:
+            hook_user_prompt_submit(project=self.project)
+            out = fake_out.getvalue()
+            self.assertIn(" -- ", out)
+            self.assertTrue(out.strip().startswith("["))
+
+        # Off via AGI_MEMORY_PROMPT_CLOCK=0
+        with patch.dict(os.environ, {"AGI_MEMORY_DB": str(self.db_path), "AGI_MEMORY_PROMPT_CLOCK": "0"}), \
+             patch("agi_memory.hooks._read_hook_payload", return_value={"prompt": "hello world"}), \
+             patch("sys.stdout", new=io.StringIO()) as fake_out:
+            hook_user_prompt_submit(project=self.project)
+            out = fake_out.getvalue()
+            self.assertNotIn(" -- ", out)
+
 
 if __name__ == "__main__":
     unittest.main()

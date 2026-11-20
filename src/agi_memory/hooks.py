@@ -425,6 +425,21 @@ def prompt_recall(prompt: str, project: Optional[str] = None, db_path: Optional[
     ])
 
 
+def format_prompt_clock() -> str:
+    """Format current time, timezone, and user as [18:19 IST -- username]."""
+    try:
+        import datetime, time, getpass
+        now = datetime.datetime.now()
+        tz = now.astimezone().tzname() or (time.tzname[time.daylight] if time.daylight else (time.tzname[0] if time.tzname else "")) or "UTC"
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+        return f"[{now.strftime('%H:%M')} {tz} -- {user}]"
+    except Exception:
+        return ""
+
+
 def hook_user_prompt_submit(project: Optional[str] = None) -> None:
     if _in_summarizer():
         return
@@ -434,9 +449,19 @@ def hook_user_prompt_submit(project: Optional[str] = None) -> None:
     prompt = str(payload.get("prompt") or "")
     sid = payload.get("session_id") or None
     proj = project or detect_project()
+
+    clock_enabled = os.environ.get("AGI_MEMORY_PROMPT_CLOCK", "1").strip().lower() not in ("0", "false", "no", "off")
+    clock_line = format_prompt_clock() if clock_enabled else ""
+
     out = prompt_recall(prompt, proj, session_id=sid)
+    parts = []
+    if clock_line:
+        parts.append(clock_line)
     if out:
-        print(out)
+        parts.append(out)
+    if parts:
+        print("\n\n".join(parts))
+
     if prompt.strip() and not prompt.lstrip().startswith("/") and not _HARNESS_TURN.match(prompt):
         try:
             try:
