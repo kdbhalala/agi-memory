@@ -287,6 +287,84 @@ class TestSessionSummaries(unittest.TestCase):
         self.assertEqual(stored["outcome"], "completed")
         self.assertEqual(stored["origin"], "agent-inferred")
 
+    # 9. MCP server recursion guard
+    def test_mcp_server_recursion_guard(self):
+        from agi_memory.mcp_server import _ensure_session, call_tool
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        sessions_before = len(ep.get_timeline(project=self.project))
+
+        with patch.dict(os.environ, {"AGI_MEMORY_SUMMARIZER": "1"}):
+            # _ensure_session must not create any session row
+            _ensure_session(self.project)
+            sessions_after = len(ep.get_timeline(project=self.project))
+            self.assertEqual(sessions_before, sessions_after)
+
+            # Write tool must be skipped
+            res = call_tool("memory_record", {"text": "A test decision", "project": self.project})
+            self.assertIn("Skipped:", res)
+
+    # 10. Debounce for turn-based hosts (agy, opencode)
+    def test_debounce_turn_based_hosts(self):
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        sess = ep.start_session(project=self.project, goal="Interactive turn session")
+        sid = sess["session_id"]
+        ep.record_event(sid, "cmd", "npm test", project=self.project)
+
+        # Mock call_host_cli
+        mock_resp = "SUMMARY: Ran npm test and verified output.\nOUTCOME: completed"
+
+        with patch("agi_memory.summarizer.call_host_cli", return_value=mock_resp):
+            # Turn 1 at t=1000: first summary runs
+            with patch("time.time", return_value=1000.0):
+                res1 = summarize_session(sid, self.project, "opencode", db_path=self.db_path)
+                self.assertIsNotNone(res1)
+                self.assertEqual(res1["summary"], "Ran npm test and verified output.")
+
+            # Turn 2 at t=1100 (100s later < 600s, same events): must debounce / return None
+            with patch("time.time", return_value=1100.0):
+                res2 = summarize_session(sid, self.project, "opencode", db_path=self.db_path)
+                self.assertIsNone(res2)
+
+            # Turn 3 at t=1800 (800s later > 600s, but NO new events): must debounce / return None
+            with patch("time.time", return_value=1800.0):
+                res3 = summarize_session(sid, self.project, "opencode", db_path=self.db_path)
+                self.assertIsNone(res3)
+
+            # Add new event
+            ep.record_event(sid, "file_edit", "Edited index.js", project=self.project)
+
+            # Turn 4 at t=1850 (850s later > 600s, WITH new event): runs summary!
+            with patch("time.time", return_value=1850.0):
+                res4 = summarize_session(sid, self.project, "opencode", db_path=self.db_path)
+                self.assertIsNotNone(res4)
+
+            # Claude host does NOT debounce: runs immediately
+            with patch("time.time", return_value=1860.0):
+                res_claude = summarize_session(sid, self.project, "claude", db_path=self.db_path)
+                self.assertIsNotNone(res_claude)
+
+    # 11. Never overwrite a real summary with SKIP from a later, quieter turn
+    def test_never_overwrite_real_summary_with_skip(self):
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        sess = ep.start_session(project=self.project, goal="Implement user profile feature")
+        sid = sess["session_id"]
+
+        # Initial turn produces a real summary
+        mock_real = "SUMMARY: Implemented user profile view and controller.\nOUTCOME: completed"
+        with patch("agi_memory.summarizer.call_host_cli", return_value=mock_real):
+            res1 = summarize_session(sid, self.project, "claude", db_path=self.db_path)
+            self.assertEqual(res1["summary"], "Implemented user profile view and controller.")
+
+        # Subsequent quiet turn (e.g. user says "thanks", model returns SKIP)
+        with patch("agi_memory.summarizer.call_host_cli", return_value="SKIP"):
+            res2 = summarize_session(sid, self.project, "claude", db_path=self.db_path, force=True)
+            self.assertEqual(res2["summary"], "Implemented user profile view and controller.")
+
+        # Stored session must still retain the real summary
+        stored = ep.get_session(sid)
+        self.assertEqual(stored["summary"], "Implemented user profile view and controller.")
+
 
 if __name__ == "__main__":
     unittest.main()
+

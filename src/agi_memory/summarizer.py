@@ -195,20 +195,28 @@ def build_summarizer_cmd(
         return cmd, True, out
 
     if host.startswith("opencode"):
-        # opencode run --archived --format default
+        # opencode run --agent plan --archived --format default
+        # --agent plan blocks tools/shell/edits completely
         cmd = [
             bin_path,
             "run",
+            "--agent", "plan",
             "--archived",
             "--format", "default",
         ]
         return cmd, True, None
 
     if host == "agy":
-        # agy --disable-slash-commands --output-format text -p <prompt>
+        # agy --mode plan --sandbox --model gemini-3.8-flash-low --effort low --output-format text -p <prompt>
+        # --mode plan and --sandbox prevent tool execution and file modifications.
+        # --model gemini-3.8-flash-low --effort low ensures fast, cheap responses (<20s).
+        # NOTE: Do NOT pass --disable-slash-commands, as it disables --mode plan.
         cmd = [
             bin_path,
-            "--disable-slash-commands",
+            "--mode", "plan",
+            "--sandbox",
+            "--model", "gemini-3.8-flash-low",
+            "--effort", "low",
             "--output-format", "text",
             "-p", prompt,
         ]
@@ -435,6 +443,7 @@ def summarize_session(
     host: str,
     transcript_path: Optional[str] = None,
     db_path: Optional[Path | str] = None,
+    force: bool = False,
     timeout: int = 120,
 ) -> Optional[Dict[str, Any]]:
     """Generate and store summary for a single completed session."""
@@ -456,6 +465,27 @@ def summarize_session(
     commits = sess.get("commits") or []
     touched = sess.get("touched_files") or []
     events = sess.get("events") or []
+    current_event_count = len(events) + len(commits) + len(touched)
+
+    now = time.time()
+    meta_key = f"summary_meta:{sid}"
+
+    # Non-Claude hosts (e.g. agy, opencode) fire every turn (Stop / session.idle).
+    # Debounce: summarize only when the session has new events since the last summary
+    # AND at least 10 minutes passed since its last summary (keep timestamp per session).
+    # Claude's SessionEnd stays immediate.
+    if not force and host != "claude":
+        meta_str = ep.get_meta(meta_key)
+        if meta_str:
+            try:
+                meta_data = json.loads(meta_str)
+                last_time = float(meta_data.get("timestamp", 0))
+                last_events = int(meta_data.get("event_count", 0))
+                if (now - last_time < 600) or (current_event_count <= last_events):
+                    _log(f"Debounce: skipping summary for session {sid} (last: {now - last_time:.1f}s ago, events: {last_events} -> {current_event_count})")
+                    return None
+            except Exception:
+                pass
 
     tail = read_transcript_tail(transcript_path)
     prompt = build_summary_prompt(
@@ -474,6 +504,12 @@ def summarize_session(
         _log(f"Failed to summarize session {sid} using {host}: {err}")
         return None
 
+    existing_summary = (sess.get("summary") or "").strip()
+    # Never overwrite a real summary with SKIP from a later, quieter turn
+    if (not summary or summary == "SKIP") and existing_summary and existing_summary != "SKIP":
+        _log(f"Preserving existing summary for session {sid}; ignoring SKIP from later turn")
+        summary = existing_summary
+
     current_outcome = (sess.get("outcome") or "unknown").lower()
     # Outcome is ONLY set if currently unknown (an explicit call always wins)
     new_outcome = inferred_outcome if current_outcome == "unknown" else None
@@ -484,6 +520,15 @@ def summarize_session(
         outcome=new_outcome,
         origin="agent-inferred",
     )
+
+    try:
+        ep.set_meta(meta_key, json.dumps({
+            "timestamp": now,
+            "event_count": current_event_count,
+        }))
+    except Exception:
+        pass
+
     return {"session_id": sid, "summary": summary, "outcome": new_outcome or current_outcome}
 
 

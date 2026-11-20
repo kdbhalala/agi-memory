@@ -13,6 +13,7 @@ Exposes the four-pillar framework to any MCP-capable coding agent:
 Run:  python3 mcp_server.py   (spawned by the agent with any cwd)
 """
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -403,6 +404,8 @@ def _ensure_session(project):
     or its writer is gone, and start your own when a live process still holds
     it. A 12-hour window could not tell those apart.
     """
+    if os.environ.get("AGI_MEMORY_SUMMARIZER") == "1":
+        return project
     try:
         proj = project
         if not proj:
@@ -450,6 +453,10 @@ def _ensure_session(project):
 
 
 def call_tool(name, args):
+    if os.environ.get("AGI_MEMORY_SUMMARIZER") == "1":
+        if name in WRITE_TOOLS or name in DESTRUCTIVE_TOOLS:
+            return f"Skipped: tool '{name}' disabled when AGI_MEMORY_SUMMARIZER=1."
+
     project = args.get("project")
     limit = int(args.get("limit", 5) or 5)
     if name.startswith("memory_") and name not in ("memory_sync",):
