@@ -252,3 +252,57 @@ def hidden_subprocess_kwargs(extra_creationflags: int = 0) -> dict:
     except Exception:
         pass
     return kwargs
+
+
+# Session summaries configuration
+SUMMARIES_ENABLED: bool = os.environ.get("AGI_MEMORY_SUMMARIES", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def are_summaries_enabled() -> bool:
+    """Return True if session summaries are enabled (default: True).
+
+    Can be disabled via environment variable AGI_MEMORY_SUMMARIES=0.
+    """
+    val = os.environ.get("AGI_MEMORY_SUMMARIES")
+    if val is not None:
+        return val.strip().lower() not in ("0", "false", "no", "off")
+    return SUMMARIES_ENABLED
+
+
+# Cheapest model per CLI for session summaries and rollups.
+# Empty string means do not pin a model (let CLI use its configured default).
+DEFAULT_SUMMARY_MODELS: dict[str, str] = {
+    "claude": "haiku",
+    "codex": "gpt-6-luna",
+    "agy": "gemini-3.8-flash-low",
+    "opencode": "",
+}
+
+
+def resolve_summary_model(host: str) -> str:
+    """Resolve summary model for host CLI, checking environment override first.
+
+    Override variable: AGI_MEMORY_SUMMARY_MODEL_<HOST> (e.g. AGI_MEMORY_SUMMARY_MODEL_CODEX).
+    Empty value or unset for opencode lets the CLI use its configured default.
+    """
+    import re
+
+    clean_host = (host or "").split()[0].lower()
+    # Normalize extensions if any
+    for ext in (".exe", ".cmd", ".sh", ".bat"):
+        if clean_host.endswith(ext):
+            clean_host = clean_host[:-len(ext)]
+            break
+
+    # Direct match: e.g. AGI_MEMORY_SUMMARY_MODEL_CODEX or AGI_MEMORY_SUMMARY_MODEL_OPENCODE2
+    env_key = f"AGI_MEMORY_SUMMARY_MODEL_{clean_host.upper()}"
+    if env_key in os.environ:
+        return os.environ[env_key].strip()
+
+    # Base match: e.g. opencode2 -> AGI_MEMORY_SUMMARY_MODEL_OPENCODE
+    base_host = re.sub(r"\d+$", "", clean_host)
+    base_env_key = f"AGI_MEMORY_SUMMARY_MODEL_{base_host.upper()}"
+    if base_env_key in os.environ:
+        return os.environ[base_env_key].strip()
+
+    return DEFAULT_SUMMARY_MODELS.get(clean_host, DEFAULT_SUMMARY_MODELS.get(base_host, ""))

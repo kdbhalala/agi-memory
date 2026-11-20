@@ -1259,6 +1259,9 @@ def cmd_install(args: argparse.Namespace) -> None:
             elif tool.name == "opencode":
                 ok, msg = hooks.install_opencode_plugin(scope=scope, py_path=py_path)
                 print(f"  [{'✓' if ok else '!'}] OpenCode plugin: {msg}")
+            elif tool.name == "codex":
+                ok, msg = hooks.install_codex_hooks(scope=scope, py_path=py_path)
+                print(f"  [{'✓' if ok else '!'}] OpenAI Codex hooks: {msg}")
         # Git hooks are per-repository; this command is per-machine. It used to
         # install them unconditionally into Path.cwd(), so anyone who ran
         # `agi-integrate install all` while standing in a repo they were only
@@ -1314,7 +1317,14 @@ def cmd_install(args: argparse.Namespace) -> None:
             force=getattr(args, "force", False),
             tools=tool_names
         )
-        for path_str, status in sorted(cmd_results.items()):
+        handoff_results = _init_cmd.install_handoff_command(
+            target_dir=Path.cwd() if scope != "user" else ".",
+            scope=scope,
+            force=getattr(args, "force", False),
+            tools=tool_names
+        )
+        combined_results = {**cmd_results, **handoff_results}
+        for path_str, status in sorted(combined_results.items()):
             icon = "✓" if status.startswith("written") else ("-" if status.startswith("skipped") else "!")
             lbl = status.split(" — ")[-1]
             print(f"  [{icon}] {lbl:26}: {status.split(' — ')[0]}")
@@ -2006,18 +2016,24 @@ alwaysApply: true
             import hooks
         hooks.install_claude_hooks(scope="project", py_path=py_path)
         hooks.install_agy_hooks(scope="project", py_path=py_path)
+        hooks.install_codex_hooks(scope="project", py_path=py_path)
         hooks.install_git_hooks(target_dir=target, py_path=py_path)
-        print(f"  [✓] Configured project lifecycle hooks (.claude/settings.json, .agents/hooks.json, .git/hooks/)")
+        print(f"  [✓] Configured project lifecycle hooks (.claude/settings.json, .agents/hooks.json, .codex/hooks.json, .git/hooks/)")
     except Exception as e:
         print(f"  [-] Project hooks setup skipped: {e}")
 
-    # 8. The /agi-init slash command, in each assistant's own format
+    # 8. The /agi-init and /handoff slash commands, in each assistant's own format
     cmd_results = _init_cmd.install_init_command(target, project=proj_name, force=force)
-    written = [v for v in cmd_results.values() if v.startswith("written")]
     for path, status in sorted(cmd_results.items()):
         rel = Path(path).relative_to(target) if str(path).startswith(str(target)) else Path(path)
         mark = "✓" if status.startswith("written") else ("!" if status.startswith("failed") else "-")
         print(f"  [{mark}] /{_init_cmd.COMMAND_NAME}: {rel} ({status.split(' — ')[-1]})")
+
+    handoff_results = _init_cmd.install_handoff_command(target, project=proj_name, force=force)
+    for path, status in sorted(handoff_results.items()):
+        rel = Path(path).relative_to(target) if str(path).startswith(str(target)) else Path(path)
+        mark = "✓" if status.startswith("written") else ("!" if status.startswith("failed") else "-")
+        print(f"  [{mark}] /{_init_cmd.HANDOFF_COMMAND_NAME}: {rel} ({status.split(' — ')[-1]})")
 
     # 9. File fallback for hook-less tools: .agent/MEMORY.md
     try:
@@ -2067,10 +2083,12 @@ def cmd_hooks(args: argparse.Namespace) -> None:
                 ok, msg = hooks.uninstall_agy_hooks(scope=scope) if uninstall else hooks.install_agy_hooks(scope=scope, py_path=py_path)
             elif t == "opencode":
                 ok, msg = hooks.uninstall_opencode_plugin(scope=scope) if uninstall else hooks.install_opencode_plugin(scope=scope, py_path=py_path)
+            elif t in ("codex", "openai-codex"):
+                ok, msg = hooks.uninstall_codex_hooks(scope=scope) if uninstall else hooks.install_codex_hooks(scope=scope, py_path=py_path)
             elif t == "git":
                 ok, msg = hooks.uninstall_git_hooks() if uninstall else hooks.install_git_hooks(py_path=py_path)
             else:
-                ok, msg = False, f"Unsupported hook tool: {t}. Supported: claude, agy, opencode, git, all"
+                ok, msg = False, f"Unsupported hook tool: {t}. Supported: claude, agy, opencode, codex, git, all"
             icon = "✓" if ok else "✗"
             print(f"[{icon}] {t:12}: {msg}")
     print()
@@ -2136,7 +2154,7 @@ def main() -> None:
 
     # hooks
     p_hooks = subparsers.add_parser("hooks", help="Manage automated lifecycle hooks (session-start, pre-compact, session-end, pre-commit)")
-    p_hooks.add_argument("tools", nargs="*", default=["all"], help="Tool names (claude, agy, git, all)")
+    p_hooks.add_argument("tools", nargs="*", default=["all"], help="Tool names (claude, agy, opencode, codex, git, all)")
     p_hooks.add_argument("--scope", choices=["user", "project"], default="user", help="Scope: user or project (default: user)")
     p_hooks.add_argument("--uninstall", action="store_true", help="Uninstall lifecycle hooks instead of installing")
     p_hooks.add_argument("--python", help="Override Python executable path")

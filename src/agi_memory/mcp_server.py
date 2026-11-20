@@ -13,6 +13,7 @@ Exposes the four-pillar framework to any MCP-capable coding agent:
 Run:  python3 mcp_server.py   (spawned by the agent with any cwd)
 """
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -178,6 +179,12 @@ TOOLS = [
                                     "min_sessions": {"type": "integer", "default": 3, "description": "Only report signatures seen in at least this many sessions"},
                                     "limit": {"type": "integer", "default": 10, "description": "Max signatures to return"}},
                      "required": []}},
+    {"name": "memory_handoff",
+     "description": "Store an explicit handoff note for the next session (what was done, what is next, blockers). Delivered at session-start up to 3 times or until replaced.",
+     "inputSchema": {"type": "object",
+                     "properties": {"note": {"type": "string", "description": "Handoff note text (what was done, next steps, blockers; max ~2 KB)"},
+                                    "project": {"type": "string", "description": "Optional project name filter"}},
+                     "required": ["note"]}},
     {"name": "code_structure",
      "description": "Get structural outline of classes, functions, methods, and types in a file or directory (structural code graph).",
      "inputSchema": {"type": "object",
@@ -240,6 +247,7 @@ WRITE_TOOLS = frozenset({
     "memory_record",
     "memory_promote",
     "memory_session_outcome",
+    "memory_handoff",
     "code_index",
 })
 
@@ -403,6 +411,8 @@ def _ensure_session(project):
     or its writer is gone, and start your own when a live process still holds
     it. A 12-hour window could not tell those apart.
     """
+    if os.environ.get("AGI_MEMORY_SUMMARIZER") == "1":
+        return project
     try:
         proj = project
         if not proj:
@@ -450,6 +460,10 @@ def _ensure_session(project):
 
 
 def call_tool(name, args):
+    if os.environ.get("AGI_MEMORY_SUMMARIZER") == "1":
+        if name in WRITE_TOOLS or name in DESTRUCTIVE_TOOLS:
+            return f"Skipped: tool '{name}' disabled when AGI_MEMORY_SUMMARIZER=1."
+
     project = args.get("project")
     limit = int(args.get("limit", 5) or 5)
     if name.startswith("memory_") and name not in ("memory_sync",):
@@ -737,6 +751,19 @@ def call_tool(name, args):
         return "\n".join(f"{r['signature']} -- {r['sessions']} sessions, {r['hits']} failures"
                          + (" -- passing in last 2 sessions" if r.get("cleared") else "")
                          for r in rows)
+    if name == "memory_handoff":
+        note = args.get("note", "").strip()
+        if not note:
+            return "Error: note is required."
+        if not project:
+            try:
+                from agi_memory.hooks import detect_project
+            except ImportError:
+                from hooks import detect_project
+            project = detect_project()
+        ep = EpisodicLayer(project=project)
+        ep.set_handoff(note, project=project)
+        return f"Handoff note recorded for project '{project}'. Delivered at next session-start (up to 3 times or until replaced)."
     if name == "code_structure":
         cl = CodeLayer(project=project)
         target_path = args.get("path", ".") or "."
@@ -1129,6 +1156,16 @@ def cmd_friction(argv: list[str]) -> None:
                                         "limit": args.limit}))
 
 
+def cmd_handoff(argv: list[str]) -> None:
+    import argparse
+    parser = argparse.ArgumentParser(prog="agi-memory handoff",
+                                     description="Store a handoff note for the next session")
+    parser.add_argument("note", help="Handoff note text")
+    parser.add_argument("--project", "-p", default=None, help="Project filter")
+    args = parser.parse_args(argv)
+    print(call_tool("memory_handoff", {"note": args.note, "project": args.project}))
+
+
 def cmd_outcome(argv: list[str]) -> None:
     import argparse
     parser = argparse.ArgumentParser(prog="agi-memory outcome",
@@ -1323,6 +1360,13 @@ def main(argv: list[str] | None = None) -> None:
                 import history_import
             history_import.main(argv[1:])
             return
+        elif cmd in ("import-remember", "import_remember"):
+            try:
+                from agi_memory import import_remember
+            except ImportError:
+                import import_remember
+            import_remember.main(argv[1:])
+            return
         elif cmd == "log":
             cmd_log(argv[1:])
             return
@@ -1379,6 +1423,9 @@ def main(argv: list[str] | None = None) -> None:
             return
         elif cmd == "friction":
             cmd_friction(argv[1:])
+            return
+        elif cmd == "handoff":
+            cmd_handoff(argv[1:])
             return
         elif cmd == "structure":
             cmd_structure(argv[1:])

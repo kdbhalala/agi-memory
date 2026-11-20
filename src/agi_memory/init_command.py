@@ -246,6 +246,136 @@ def install_init_command(target_dir: Path | str = ".", project: str | None = Non
     return results
 
 
+# --- /handoff command ---------------------------------------------------------
+HANDOFF_COMMAND_NAME = "handoff"
+HANDOFF_DESCRIPTION = "Record a structured handoff note for the next session."
+
+HANDOFF_PLAYBOOK = """\
+Write a handoff note for the next session in this project.
+
+## 1. What to include
+Write 3-6 lines covering:
+- What was done in this session
+- What should be done next
+- Any blockers, failing tests, or traps to watch out for
+
+## 2. Store the handoff
+Call the `memory_handoff` tool with your note:
+`memory_handoff(note="...", project="<project>")`
+
+Keep it concise (under 2 KB). The note will be delivered at the start of the next session (up to 3 times or until replaced).
+"""
+
+HANDOFF_ARGUMENT_NOTE = """
+If arguments were provided, incorporate them into the handoff note.
+"""
+
+HANDOFF_PROJECT_TARGETS: List[Tuple[str, str, str]] = [
+    ("Claude Code", f".claude/skills/{HANDOFF_COMMAND_NAME}/SKILL.md", "skill"),
+    ("Cursor", f".cursor/skills/{HANDOFF_COMMAND_NAME}/SKILL.md", "skill"),
+    ("OpenCode", f".opencode/commands/{HANDOFF_COMMAND_NAME}.md", "md_frontmatter"),
+    ("OpenAI Codex", f".codex/skills/{HANDOFF_COMMAND_NAME}/SKILL.md", "skill"),
+    ("Gemini CLI", f".gemini/commands/{HANDOFF_COMMAND_NAME}.toml", "toml"),
+    ("Antigravity CLI", f".agents/skills/{HANDOFF_COMMAND_NAME}/SKILL.md", "skill"),
+    ("Windsurf", f".windsurf/workflows/{HANDOFF_COMMAND_NAME}.md", "workflow"),
+    ("Cline", f".clinerules/workflows/{HANDOFF_COMMAND_NAME}.md", "workflow"),
+    ("Roo Code", f".roo/skills/{HANDOFF_COMMAND_NAME}/SKILL.md", "skill"),
+    ("Hermes Agent", f".hermes/skills/{HANDOFF_COMMAND_NAME}/SKILL.md", "skill"),
+]
+
+
+def user_scope_handoff_targets() -> List[Tuple[str, Path, str]]:
+    home = Path.home()
+    return [
+        ("Claude Code", home / ".claude" / "skills" / HANDOFF_COMMAND_NAME / "SKILL.md", "skill"),
+        ("Cursor", home / ".cursor" / "skills" / HANDOFF_COMMAND_NAME / "SKILL.md", "skill"),
+        ("OpenCode", home / ".config" / "opencode" / "commands" / f"{HANDOFF_COMMAND_NAME}.md", "md_frontmatter"),
+        ("OpenAI Codex", home / ".codex" / "skills" / HANDOFF_COMMAND_NAME / "SKILL.md", "skill"),
+        ("Gemini CLI", home / ".gemini" / "commands" / f"{HANDOFF_COMMAND_NAME}.toml", "toml"),
+        ("Antigravity CLI", home / ".gemini" / "config" / "skills" / HANDOFF_COMMAND_NAME / "SKILL.md", "skill"),
+        ("Windsurf", home / ".codeium" / "windsurf" / "global_workflows" / f"{HANDOFF_COMMAND_NAME}.md", "workflow"),
+        ("Cline", home / "Documents" / "Cline" / "Workflows" / f"{HANDOFF_COMMAND_NAME}.md", "workflow"),
+        ("Roo Code", home / ".roo" / "skills" / HANDOFF_COMMAND_NAME / "SKILL.md", "skill"),
+        ("Hermes Agent", home / ".hermes" / "skills" / HANDOFF_COMMAND_NAME / "SKILL.md", "skill"),
+    ]
+
+
+def render_handoff(fmt: str, project: str | None = None) -> str:
+    body = HANDOFF_PLAYBOOK.replace("<project>", project) if project else HANDOFF_PLAYBOOK
+    if fmt == "md_frontmatter":
+        return (
+            "---\n"
+            f"description: {HANDOFF_DESCRIPTION}\n"
+            "argument-hint: [optional handoff notes]\n"
+            "---\n\n"
+            f"{body}\n{HANDOFF_ARGUMENT_NOTE}\nArguments: $ARGUMENTS\n"
+        ).strip() + "\n"
+    elif fmt == "toml":
+        escaped = body.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+        return (
+            f'description = "{HANDOFF_DESCRIPTION}"\n\n'
+            f'prompt = """\n{escaped}\n{HANDOFF_ARGUMENT_NOTE}\nArguments: {{{{args}}}}\n"""\n'
+        ).strip() + "\n"
+    elif fmt == "workflow":
+        return (
+            f"---\ndescription: {HANDOFF_DESCRIPTION}\n---\n\n"
+            f"# {HANDOFF_COMMAND_NAME}\n\n{body}\n{HANDOFF_ARGUMENT_NOTE}\n"
+        ).strip() + "\n"
+    elif fmt == "skill":
+        return (
+            "---\n"
+            f"name: {HANDOFF_COMMAND_NAME}\n"
+            f"description: {HANDOFF_DESCRIPTION} Use when wrapping up work or transferring context to the next session.\n"
+            "---\n\n"
+            f"# {HANDOFF_COMMAND_NAME}\n\n{body}\n{HANDOFF_ARGUMENT_NOTE}\nArguments: $ARGUMENTS\n"
+        ).strip() + "\n"
+    raise ValueError(f"Unknown format: {fmt}")
+
+
+def install_handoff_command(target_dir: Path | str = ".", project: str | None = None,
+                            scope: str = "project", force: bool = False,
+                            tools: Sequence[str] | None = None) -> Dict[str, str]:
+    """Write /handoff in every assistant's command format. Returns path -> status."""
+    results: Dict[str, str] = {}
+
+    if scope == "user":
+        entries = [(label, path, fmt) for label, path, fmt in user_scope_handoff_targets()]
+    else:
+        root = Path(target_dir).resolve()
+        entries = [(label, root / rel, fmt) for label, rel, fmt in HANDOFF_PROJECT_TARGETS]
+
+    if tools and "all" not in [t.lower() for t in tools]:
+        normalized_tools = [t.lower() for t in tools]
+        entries = [
+            (label, p, fmt) for label, p, fmt in entries
+            if any(t in label.lower() or (t in ("agy", "antigravity") and "antigravity" in label.lower())
+                   or (t in ("claude", "claude-code") and "claude" in label.lower())
+                   or (t in ("codex", "openai-codex") and "codex" in label.lower())
+                   for t in normalized_tools)
+        ]
+
+    for label, path, fmt in entries:
+        try:
+            if path.exists() and not force:
+                results[str(path)] = f"skipped (exists) — {label}"
+                continue
+            curr = path.parent
+            while curr != curr.parent:
+                if curr.is_file():
+                    content = curr.read_text(encoding="utf-8")
+                    curr.unlink()
+                    curr.mkdir(parents=True, exist_ok=True)
+                    (curr / "rules.md").write_text(content, encoding="utf-8")
+                    break
+                curr = curr.parent
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(render_handoff(fmt, project), encoding="utf-8")
+            results[str(path)] = f"written — {label}"
+        except OSError as e:
+            results[str(path)] = f"failed ({e}) — {label}"
+    return results
+
+
 def demo() -> None:
     """Self-check: every format renders, and the TOML stays parseable."""
     try:
@@ -267,6 +397,7 @@ def demo() -> None:
 
     for fmt in ("md_frontmatter", "workflow", "skill"):
         assert render(fmt).startswith("---\n"), fmt
+        assert render_handoff(fmt).startswith("---\n"), fmt
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -277,6 +408,12 @@ def demo() -> None:
         assert all(v.startswith("skipped") for v in again.values()), again
         forced = install_init_command(tmp, project="demo-proj", force=True)
         assert all(v.startswith("written") for v in forced.values()), forced
+
+        h_res = install_handoff_command(tmp, project="demo-proj")
+        assert len(h_res) == len(HANDOFF_PROJECT_TARGETS)
+        assert all(v.startswith("written") for v in h_res.values()), h_res
+        h_again = install_handoff_command(tmp, project="demo-proj")
+        assert all(v.startswith("skipped") for v in h_again.values()), h_again
     print(f"init_command OK: {len(PROJECT_TARGETS)} formats"
           f"{', TOML parses' if tomllib else ' (TOML parse skipped: needs 3.11+)'}")
 

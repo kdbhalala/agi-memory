@@ -63,6 +63,16 @@ AGI_AGENT_ID=reviewer claude
   `completed` is recapped with an explicit warning not to resume it without asking.
   Without this, a dropped design session comes back next time looking like an open
   task with a running start.
+- **Per-Host Session Summaries**: At session-end, `agi-memory` generates a concise one-sentence summary and infers the outcome using the same agent CLI that ran the session (`claude`, `codex`, `opencode`, or `agy`). Data is sent strictly to the provider of the CLI that ran the session, under that CLI's account, with zero credentials read by `agi-memory`. Prompts are capped (~30 KB) and redacted with `redact.py` before sending, and responses are redacted before storing in SQLite.
+  - **Cheapest Models by Default**: Uses the most economical model per host CLI:
+    - `claude`: `haiku` (`--model haiku`)
+    - `codex`: `gpt-6-luna` (`-m gpt-6-luna -c model_reasoning_effort="low"`)
+    - `agy`: `gemini-3.8-flash-low` (`--model gemini-3.8-flash-low --effort low`)
+    - `opencode` / `opencode2`: Uses the CLI's configured default (currently free `opencode/*-free` models, $0).
+  - **Model Overrides**: Override the model for any host via `AGI_MEMORY_SUMMARY_MODEL_<HOST>` (e.g., `AGI_MEMORY_SUMMARY_MODEL_CODEX="gpt-6-luna"`, `AGI_MEMORY_SUMMARY_MODEL_OPENCODE="openai/gpt-4o-mini"`). Setting an override to empty string drops the model flag and lets the CLI use its own default.
+  - **OpenCode Model Privacy Notice**: Free `opencode/*-free` models may be logged or used for training by their respective upstream model providers. Users desiring strict privacy should set `AGI_MEMORY_SUMMARY_MODEL_OPENCODE` to a paid provider model.
+  - If a pinned model is rejected or unavailable, `agi-memory` automatically logs the warning and retries once without the model flag to ensure summaries are never lost. Opt out of summaries anytime via `AGI_MEMORY_SUMMARIES=0` or `SUMMARIES_ENABLED=False` in `config.py`.
+- **Tiered Rollups & Budgeted Recaps**: Older sessions are lazily compressed into daily rollups (>3 days) and weekly rollups (>2 weeks) in `episodic_rollups`. At `session-start`, briefings render recent session summaries alongside tiered rollups under a strict byte budget, suppressing noise and avoiding unneeded "Outcome was never recorded" warnings for inferred outcomes.
 - **Session Timelines (`memory_timeline` / `agi-memory timeline`)**: Retrieve structured chronological histories of prior sessions and inspect what changes were made across tools.
 ```bash
 # Inspect recent session activity and touched files

@@ -14,7 +14,7 @@ graph TD
         CR["Crush / Pi"]
     end
 
-    MCP["agi-memory MCP Server (18 Stdio Tools)<br/><b>Epistemic:</b> <code>memory_recall</code> · <code>memory_recall_deep</code> · <code>memory_record</code> · <code>memory_pin</code> · <code>memory_unpin</code> · <code>memory_blocks</code><br/><b>Semantic:</b> <code>memory_promote</code> · <code>memory_sync</code> · <code>memory_bootstrap</code><br/><b>Episodic:</b> <code>memory_timeline</code> · <code>memory_session_outcome</code> · <code>memory_wip</code> · <code>memory_friction</code><br/><b>Structural:</b> <code>code_structure</code> · <code>code_callers</code> · <code>code_dependencies</code> · <code>code_impact</code> · <code>code_index</code>"]
+    MCP["agi-memory MCP Server (19 Stdio Tools)<br/><b>Epistemic:</b> <code>memory_recall</code> · <code>memory_recall_deep</code> · <code>memory_record</code> · <code>memory_pin</code> · <code>memory_unpin</code> · <code>memory_blocks</code><br/><b>Semantic:</b> <code>memory_promote</code> · <code>memory_sync</code> · <code>memory_bootstrap</code><br/><b>Episodic:</b> <code>memory_timeline</code> · <code>memory_session_outcome</code> · <code>memory_wip</code> · <code>memory_friction</code> · <code>memory_handoff</code><br/><b>Structural:</b> <code>code_structure</code> · <code>code_callers</code> · <code>code_dependencies</code> · <code>code_impact</code> · <code>code_index</code>"]
 
     subgraph Storage ["Native Four-Pillar Cognitive Architecture (Zero Dependencies)"]
         L1["L1 Epistemic Working Memory (SQLite FTS5)<br/>0.23ms · BM25 Ranking · Pinned Core Blocks"]
@@ -45,7 +45,8 @@ graph TD
 3. **L3 Episodic Session History (`src/agi_memory/layers/episodic_layer.py`)**:
    - Zero-dependency episodic memory answering *"What happened during previous agent sessions?"*
    - Tracks session start/end lifecycles, duration, touched files, events, and git commit deltas.
-   - Cross-session recaps automatically injected on session start, giving every assistant instant continuity across restarts.
+   - Per-host session summarization spawned detached at session-end using the session's native agent CLI (`claude`, `codex`, `opencode`, `agy`) with full credential/secret redaction and zero recursion.
+   - Tiered lazy compression (>3d daily, >2w weekly) and budgeted session-start recaps ensuring fast, noise-free briefings across restarts. Disable anytime via `AGI_MEMORY_SUMMARIES=0`.
 4. **L4 Structural Code Graph (`src/agi_memory/layers/code_layer.py`)**:
    - Zero-dependency code intelligence answering *"How is this codebase structurally connected?"*
    - Python stdlib `ast` + streaming regex parser for TypeScript, JavaScript, Go, Rust, and Dart with sha256 incremental hashing.

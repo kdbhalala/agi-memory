@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-20
+
+### Added
+- **Per-host session summaries using the host's own CLI.** When a session completes,
+  its transcript is summarized using the CLI of the assistant that ran it:
+  `claude -p` (`haiku`), `codex exec` (`gpt-6-luna` with low reasoning effort),
+  `opencode`/`opencode2 run` (user's configured default or dynamic `opencode/*-free` fallback),
+  and `agy -p` (`gemini-3.8-flash-low` with `--sandbox --mode plan`).
+  Summaries and inferred outcomes (`completed`, `abandoned`, `blocked`, `superseded`)
+  are stored in the episodic layer and vault. Explicit calls to `memory_session_outcome`
+  always take precedence. Can be opted out globally via `AGI_MEMORY_SUMMARIES=0`
+  or overridden per host via `AGI_MEMORY_SUMMARY_MODEL_<HOST>`.
+- **Daily and weekly episodic rollups.** Consecutive sessions within a day and week
+  are synthesized into hierarchical rollups (`period_type='day'` and `'week'`),
+  preventing unbounded session log growth and powering fast historical recaps.
+- **Budgeted session-start recaps and missed-session recovery.** Session-start hooks
+  inject a compact, token-budgeted recap of recent work, pending items, and rollups.
+  A detached background sweep automatically recovers and summarizes sessions that were
+  abruptly terminated before normal shutdown.
+- **`memory_handoff` tool and `/handoff` slash command.** Added the 19th MCP tool,
+  `memory_handoff`, allowing agents to record and retrieve structured inter-session
+  handoff notes across coding assistants, with native `/handoff` slash command support.
+- **Local prompt clock.** User prompt submissions now display the current local time
+  and day of the week to assist agents with time-sensitive context (can be disabled
+  via `AGI_MEMORY_PROMPT_CLOCK=0`).
+- **Codex lifecycle hooks.** Integrated full hooks support for Codex environments
+  in `~/.codex/hooks.json`, bringing lifecycle event parity across Claude Code,
+  Codex, OpenCode, and Antigravity.
+- **Remember plugin history importer (`agi-memory import-remember`).** One-time migration
+  utility discovering `.remember/` stores across repos and user scopes, merging
+  multi-source entries (`recent.md`, `today-*.md`, `now.md`) in order with line
+  deduplication into episodic rollups, appending to existing rollups under `From Remember:`,
+  and converting `remember.md` notes to `memory_handoff`. Fully documented in `docs/migration-remember.md`.
+
+### Security & Privacy
+- **Strict nested-call execution isolation.** The summarizer CLI invokes host CLIs
+  with all tools, execution permissions, shell commands, and plugins disabled
+  (`--agent plan`, `--sandbox`, isolated configs), preventing prompt injection from
+  untrusted transcript text. Recursive invocation loops are blocked via `AGI_MEMORY_SUMMARIZER=1`.
+- **Zero third-party data egress.** Summaries are sent strictly to the AI provider
+  already associated with the CLI that ran the session, under the user's existing account.
+  All transcript text is processed through `redact()` before prompt dispatch and
+  before persistence.
+
+### Changed
+- **Session summary debouncing.** Per-turn assistants debounce summary triggers to
+  avoid redundant model calls during rapid interactive exchanges.
+
 ## [0.15.0] - 2026-11-13
 
 ### Fixed
