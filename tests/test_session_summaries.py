@@ -559,6 +559,62 @@ class TestSessionSummaries(unittest.TestCase):
                 self.assertEqual(m, "opencode/fallback-model")
 
 
+    # 19. OpenCode free quota fallback tries next *-free model and caches working model
+    def test_opencode_free_quota_fallback(self):
+        call_models = []
+
+        def fake_exec(host, prompt, model=None, timeout=120):
+            call_models.append(model)
+            if model == "opencode/model-a-free":
+                raise RuntimeError("Free usage limit reached for model-a")
+            return "SUMMARY: Worked on second model.\nOUTCOME: completed"
+
+        fake_free = ["opencode/model-a-free", "opencode/model-b-free", "opencode/model-c-free"]
+        with patch("agi_memory.summarizer.get_opencode_free_models", return_value=fake_free), \
+             patch("agi_memory.summarizer._exec_host_cli", side_effect=fake_exec):
+            res = call_host_cli("opencode", "test", db_path=self.db_path)
+            self.assertIn("Worked on second model", res)
+            self.assertEqual(call_models, ["opencode/model-a-free", "opencode/model-b-free"])
+
+            # Verify working model was cached in episodic_meta
+            ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+            cached = ep.get_meta("opencode_last_working_model")
+            self.assertEqual(cached, "opencode/model-b-free")
+
+    # 20. Cached working OpenCode model is tried first next time
+    def test_opencode_cached_model_tried_first(self):
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        ep.set_meta("opencode_last_working_model", "opencode/model-b-free")
+
+        fake_free = ["opencode/model-a-free", "opencode/model-b-free", "opencode/model-c-free"]
+        with patch("agi_memory.summarizer.get_opencode_free_models", return_value=fake_free):
+            from agi_memory.summarizer import resolve_opencode_candidate_models
+            cands = resolve_opencode_candidate_models(db_path=self.db_path)
+            self.assertEqual(cands[0], "opencode/model-b-free")
+
+    # 21. OpenCode stops after 3 failed attempts
+    def test_opencode_stops_after_three_failed_attempts(self):
+        call_models = []
+
+        def fake_exec(host, prompt, model=None, timeout=120):
+            call_models.append(model)
+            raise RuntimeError(f"Rate limited on {model}")
+
+        fake_free = [
+            "opencode/model-1-free",
+            "opencode/model-2-free",
+            "opencode/model-3-free",
+            "opencode/model-4-free",
+        ]
+        with patch("agi_memory.summarizer.get_opencode_free_models", return_value=fake_free), \
+             patch("agi_memory.summarizer._exec_host_cli", side_effect=fake_exec):
+            with self.assertRaises(RuntimeError):
+                call_host_cli("opencode", "test", db_path=self.db_path)
+            # Must have stopped after exactly 3 attempts
+            self.assertEqual(len(call_models), 3)
+            self.assertEqual(call_models, ["opencode/model-1-free", "opencode/model-2-free", "opencode/model-3-free"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

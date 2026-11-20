@@ -148,40 +148,10 @@ def resolve_host_binary(host: str) -> str:
     return which_bin if which_bin else host
 
 
-def resolve_opencode_summary_model() -> str:
-    """Resolve the model to use for opencode / opencode2 summarization.
-
-    Resolution order:
-    1. Environment variable AGI_MEMORY_SUMMARY_MODEL_OPENCODE (or AGI_MEMORY_SUMMARY_MODEL_OPENCODE2)
-    2. small_model from ~/.config/opencode/opencode.json or .jsonc (preferred for cheap tasks)
-    3. model from ~/.config/opencode/opencode.json or .jsonc
-    4. First available *-free model from `opencode models` at runtime (e.g. opencode/beam-free)
-    """
-    if "AGI_MEMORY_SUMMARY_MODEL_OPENCODE" in os.environ:
-        return os.environ["AGI_MEMORY_SUMMARY_MODEL_OPENCODE"].strip()
-    if "AGI_MEMORY_SUMMARY_MODEL_OPENCODE2" in os.environ:
-        return os.environ["AGI_MEMORY_SUMMARY_MODEL_OPENCODE2"].strip()
-
-    # Check user global config (~/.config/opencode/opencode.json or .jsonc)
-    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", "").strip() or Path.home() / ".config") / "opencode"
-    for filename in ("opencode.json", "opencode.jsonc"):
-        cfg_file = config_dir / filename
-        if cfg_file.is_file():
-            try:
-                raw = cfg_file.read_text(encoding="utf-8")
-                clean = re.sub(r"//.*?\n|/\*.*?\*/", "", raw, flags=re.S)
-                cfg = json.loads(clean)
-                small_m = (cfg.get("small_model") or cfg.get("smallModel") or "").strip()
-                if small_m:
-                    return small_m
-                m = (cfg.get("model") or "").strip()
-                if m:
-                    return m
-            except Exception as e:
-                _log(f"Failed to read model from {cfg_file}: {e}")
-
-    # Discover dynamically from `opencode models` at runtime
+def get_opencode_free_models() -> List[str]:
+    """Query opencode models and return all available *-free model names."""
     bin_path = resolve_host_binary("opencode")
+    models: List[str] = []
     try:
         r = subprocess.run(
             [bin_path, "models"],
@@ -194,17 +164,79 @@ def resolve_opencode_summary_model() -> str:
             for line in r.stdout.splitlines():
                 cand = line.strip()
                 if cand.startswith("opencode/") and cand.endswith("-free"):
-                    _log(f"Discovered runtime OpenCode free model: {cand}")
-                    return cand
+                    if cand not in models:
+                        models.append(cand)
             for line in r.stdout.splitlines():
                 cand = line.strip()
                 if cand.endswith("-free"):
-                    _log(f"Discovered runtime free model: {cand}")
-                    return cand
+                    if cand not in models:
+                        models.append(cand)
     except Exception as e:
         _log(f"Failed to query opencode models: {e}")
+    if not models:
+        models = ["opencode/beam-free", "opencode/tidepool-alpha-free"]
+    return models
 
-    return "opencode/tidepool-alpha-free"
+
+def resolve_opencode_candidate_models(db_path: Optional[Path | str] = None) -> List[str]:
+    """Resolve ordered candidate models for opencode / opencode2 summarization.
+
+    Resolution order:
+    1. Environment variable AGI_MEMORY_SUMMARY_MODEL_OPENCODE (or AGI_MEMORY_SUMMARY_MODEL_OPENCODE2)
+    2. small_model from ~/.config/opencode/opencode.json or .jsonc (preferred for cheap tasks)
+    3. model from ~/.config/opencode/opencode.json or .jsonc
+    4. Cached working model from episodic_meta ("opencode_last_working_model") if still in available free models
+    5. Discovered *-free models from `opencode models` at runtime
+    """
+    if "AGI_MEMORY_SUMMARY_MODEL_OPENCODE" in os.environ:
+        val = os.environ["AGI_MEMORY_SUMMARY_MODEL_OPENCODE"].strip()
+        return [val] if val else [""]
+    if "AGI_MEMORY_SUMMARY_MODEL_OPENCODE2" in os.environ:
+        val = os.environ["AGI_MEMORY_SUMMARY_MODEL_OPENCODE2"].strip()
+        return [val] if val else [""]
+
+    # Check user global config (~/.config/opencode/opencode.json or .jsonc)
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", "").strip() or Path.home() / ".config") / "opencode"
+    for filename in ("opencode.json", "opencode.jsonc"):
+        cfg_file = config_dir / filename
+        if cfg_file.is_file():
+            try:
+                raw = cfg_file.read_text(encoding="utf-8")
+                clean = re.sub(r"//.*?\n|/\*.*?\*/", "", raw, flags=re.S)
+                cfg = json.loads(clean)
+                small_m = (cfg.get("small_model") or cfg.get("smallModel") or "").strip()
+                if small_m:
+                    return [small_m]
+                m = (cfg.get("model") or "").strip()
+                if m:
+                    return [m]
+            except Exception as e:
+                _log(f"Failed to read model from {cfg_file}: {e}")
+
+    # Discover free models
+    free_models = get_opencode_free_models()
+
+    # Check cached last working model in episodic_meta
+    cached_model = None
+    try:
+        ep = EpisodicLayer(db_path=db_path)
+        cached_model = ep.get_meta("opencode_last_working_model")
+    except Exception:
+        pass
+
+    candidates: List[str] = []
+    if cached_model and cached_model in free_models:
+        candidates.append(cached_model)
+    for fm in free_models:
+        if fm not in candidates:
+            candidates.append(fm)
+    return candidates or ["opencode/beam-free"]
+
+
+def resolve_opencode_summary_model(db_path: Optional[Path | str] = None) -> str:
+    """Resolve the default model to use for opencode / opencode2 summarization."""
+    cands = resolve_opencode_candidate_models(db_path=db_path)
+    return cands[0] if cands else ""
 
 
 def build_summarizer_cmd(
@@ -390,18 +422,46 @@ def _exec_host_cli(host: str, prompt: str, model: Optional[str] = None, timeout:
         return raw
 
 
-def call_host_cli(host: str, prompt: str, timeout: int = 120) -> str:
+def call_host_cli(
+    host: str,
+    prompt: str,
+    timeout: int = 120,
+    db_path: Optional[Path | str] = None,
+) -> str:
     """Execute host CLI in an isolated temp directory with recursion guards.
 
-    If a pinned model is rejected by the CLI (unknown model / not available on account),
-    retries once without the model flag and logs it.
+    For OpenCode, tries up to 3 candidate free models on failure, caching the first
+    working model in episodic_meta.
+    For other hosts, retries once without the model flag if the pinned model fails.
     """
     if not are_summaries_enabled():
         raise RuntimeError("Session summaries are disabled via configuration (AGI_MEMORY_SUMMARIES=0)")
 
-    model = (
-        resolve_opencode_summary_model() if host.startswith("opencode") else resolve_summary_model(host)
-    )
+    if host.startswith("opencode"):
+        candidates = resolve_opencode_candidate_models(db_path=db_path)
+        last_err = None
+        # Try up to 3 candidate models
+        for attempt_idx, cand in enumerate(candidates[:3]):
+            try:
+                out = _exec_host_cli(host, prompt, model=cand, timeout=timeout)
+                # Success! Cache last working model
+                if cand:
+                    try:
+                        ep = EpisodicLayer(db_path=db_path)
+                        ep.set_meta("opencode_last_working_model", cand)
+                        _log(f"Cached working OpenCode model in episodic_meta: {cand}")
+                    except Exception as e:
+                        _log(f"Failed to cache working OpenCode model: {e}")
+                return out
+            except Exception as err:
+                last_err = err
+                _log(f"OpenCode attempt {attempt_idx + 1}/3 with model '{cand}' failed: {err}")
+        _log(f"All {min(len(candidates), 3)} OpenCode candidate models failed. Giving up.")
+        if last_err:
+            raise last_err
+        raise RuntimeError("No candidate models available for OpenCode")
+
+    model = resolve_summary_model(host)
     try:
         return _exec_host_cli(host, prompt, model=model, timeout=timeout)
     except Exception as err:
@@ -637,7 +697,7 @@ def summarize_session(
     )
 
     try:
-        raw_resp = call_host_cli(host, prompt, timeout=timeout)
+        raw_resp = call_host_cli(host, prompt, timeout=timeout, db_path=db_path)
         summary, inferred_outcome = parse_summary_response(raw_resp)
     except Exception as err:
         _log(f"Failed to summarize session {sid} using {host}: {err}")
@@ -741,7 +801,7 @@ def compress_rollups(
             continue
 
         rollup_text = _generate_rollup_paragraph(
-            summaries, label=f"day {day_key}", host=host, timeout=timeout
+            summaries, label=f"day {day_key}", host=host, timeout=timeout, db_path=db_path
         )
         ep.record_rollup(
             project=project,
@@ -777,7 +837,7 @@ def compress_rollups(
             continue
 
         rollup_text = _generate_rollup_paragraph(
-            summaries, label=f"week {week_key}", host=host, timeout=timeout
+            summaries, label=f"week {week_key}", host=host, timeout=timeout, db_path=db_path
         )
         ep.record_rollup(
             project=project,
@@ -795,6 +855,7 @@ def _generate_rollup_paragraph(
     label: str,
     host: Optional[str] = None,
     timeout: int = 60,
+    db_path: Optional[Path | str] = None,
 ) -> str:
     """Compress multiple summaries into one paragraph via host CLI, with deterministic fallback."""
     raw_joined = " | ".join(summaries)
@@ -813,7 +874,7 @@ def _generate_rollup_paragraph(
     prompt = "\n".join(prompt_lines)
 
     try:
-        resp = call_host_cli(host, prompt, timeout=timeout)
+        resp = call_host_cli(host, prompt, timeout=timeout, db_path=db_path)
         cleaned = resp.strip()
         if cleaned and not cleaned.upper().startswith("SKIP"):
             # Ensure it is a single paragraph (no blank lines)
