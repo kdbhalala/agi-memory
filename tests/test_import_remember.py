@@ -157,6 +157,86 @@ Shipped agi-memory 0.8.0.
             self.assertEqual(res2["handoffs_imported"], 0)
             self.assertEqual(res2["handoffs_skipped"], 1)
 
+    def test_same_day_multisource_merge(self):
+        """Test that recent.md, today-*.md, and now.md for the same day are merged in order with deduplication."""
+        with tempfile.TemporaryDirectory() as td:
+            rem_dir = Path(td) / ".remember"
+            rem_dir.mkdir()
+
+            date_key = "2026-11-14"
+            # 1. recent.md
+            (rem_dir / "recent.md").write_text(f"""## {date_key}
+Line from recent.md
+Shared line across files
+""", encoding="utf-8")
+
+            # 2. today-*.md
+            (rem_dir / f"today-{date_key}.done.md").write_text("""Shared line across files
+Line from today file
+""", encoding="utf-8")
+
+            # 3. now.md (mtime on 2026-11-14)
+            now_file = rem_dir / "now.md"
+            now_file.write_text("""Shared line across files
+Line from now.md
+""", encoding="utf-8")
+            target_ts = time.mktime(time.strptime(f"{date_key} 15:30:00", "%Y-%m-%d %H:%M:%S"))
+            os.utime(now_file, (target_ts, target_ts))
+
+            ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+            res = import_remember(paths=[rem_dir], project=self.project, dry_run=False, db_path=self.db_path, verbose=False)
+
+            self.assertEqual(res["rollups_imported"], 1)
+            rollup = ep.get_rollup(self.project, "day", date_key)
+            self.assertIsNotNone(rollup)
+            summary = rollup["summary"]
+
+            # Check order: recent -> today -> now
+            recent_pos = summary.find("Line from recent.md")
+            today_pos = summary.find("Line from today file")
+            now_pos = summary.find("Line from now.md")
+            self.assertTrue(0 <= recent_pos < today_pos < now_pos)
+
+            # Check deduplication: 'Shared line across files' occurs exactly once
+            self.assertEqual(summary.count("Shared line across files"), 1)
+
+    def test_append_to_existing_non_import_rollup(self):
+        """Test that an existing rollup with origin!='history-import' has Remember text appended under 'From Remember:'."""
+        with tempfile.TemporaryDirectory() as td:
+            rem_dir = Path(td) / ".remember"
+            rem_dir.mkdir()
+
+            date_key = "2026-11-13"
+            (rem_dir / "recent.md").write_text(f"""## {date_key}
+Remember's rich narrative summary.
+""", encoding="utf-8")
+
+            ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+            # Seed an existing non-import rollup (e.g. from session summarizer)
+            ep.record_rollup(
+                self.project, "day", date_key,
+                "Auto-generated commit summary: fix null pointer",
+                session_count=2,
+                origin="agent-inferred"
+            )
+
+            res = import_remember(paths=[rem_dir], project=self.project, dry_run=False, db_path=self.db_path, verbose=False)
+            self.assertEqual(res["rollups_imported"], 1)
+            self.assertEqual(res["rollups_skipped"], 0)
+
+            rollup = ep.get_rollup(self.project, "day", date_key)
+            self.assertIsNotNone(rollup)
+            summary = rollup["summary"]
+            self.assertIn("Auto-generated commit summary: fix null pointer", summary)
+            self.assertIn("From Remember:\nRemember's rich narrative summary.", summary)
+            self.assertEqual(rollup["origin"], "history-import")
+
+            # Second run: should be skipped as idempotent
+            res2 = import_remember(paths=[rem_dir], project=self.project, dry_run=False, db_path=self.db_path, verbose=False)
+            self.assertEqual(res2["rollups_imported"], 0)
+            self.assertEqual(res2["rollups_skipped"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

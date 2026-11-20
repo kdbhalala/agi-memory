@@ -2,13 +2,15 @@
 
 Finds `.remember/` directories in the current repo and user-scope stores (~/.remember),
 and imports:
-  - recent.md day entries as episodic rollups (period_type='day', origin='history-import')
+  - recent.md day entries, today-*.md, and now.md merged per date as episodic rollups
+    (order: recent -> today -> now, deduplicating lines, capped at ~2 KB)
   - archive.md week entries as episodic rollups (period_type='week', origin='history-import')
-  - today-*.md and now.md entries as day rollups (if not already recorded)
+  - if a rollup already exists and its origin is not 'history-import', appends under
+    'From Remember:'
   - remember.md as a pending handoff note if newer than any existing one
 
 All content is redacted via redact().
-Never overwrites existing rollups for the same key (idempotent).
+Idempotent: skips entries with origin 'history-import'.
 """
 from __future__ import annotations
 
@@ -78,7 +80,8 @@ def find_remember_dirs(
     # 1. Current repository
     cwd_rem = Path.cwd() / ".remember"
     if cwd_rem.is_dir() and cwd_rem not in seen:
-        results.append((cwd_rem, detect_project(Path.cwd())))
+        proj = default_project or detect_project(Path.cwd())
+        results.append((cwd_rem, proj))
         seen.add(cwd_rem)
 
     # 2. User-scope store: ~/.remember and subdirectories
@@ -91,7 +94,8 @@ def find_remember_dirs(
                     sub_rem = sub / ".remember" if (sub / ".remember").is_dir() else sub
                     if (sub_rem / "recent.md").exists() or (sub_rem / "archive.md").exists() or (sub_rem / "now.md").exists():
                         if sub_rem not in seen:
-                            results.append((sub_rem, sub.name))
+                            proj = default_project or sub.name
+                            results.append((sub_rem, proj))
                             seen.add(sub_rem)
         except OSError:
             pass
@@ -99,7 +103,8 @@ def find_remember_dirs(
         # Also check ~/.remember itself if it has memory files
         if (user_rem / "recent.md").exists() or (user_rem / "archive.md").exists():
             if user_rem not in seen:
-                results.append((user_rem, "global"))
+                proj = default_project or "global"
+                results.append((user_rem, proj))
                 seen.add(user_rem)
 
     return results
@@ -146,29 +151,46 @@ def parse_archive_md(path: Path) -> List[Tuple[str, str]]:
     return entries
 
 
-def parse_today_and_now_files(remember_dir: Path) -> List[Tuple[str, str]]:
-    """Parse today-*.md and now.md files into (date_key, summary) entries."""
+def parse_today_files(remember_dir: Path) -> List[Tuple[str, str]]:
+    """Parse today-*.md files into (date_key, summary) entries."""
     entries: List[Tuple[str, str]] = []
     try:
-        for f in remember_dir.iterdir():
-            if not f.is_file():
-                continue
-            # today-YYYY-MM-DD[.done].md
+        files = sorted(remember_dir.glob("today-*.md"))
+        for f in files:
             m = re.match(r"^today-(\d{4}-\d{2}-\d{2})(?:\.done)?\.md$", f.name)
             if m:
                 date_key = m.group(1)
                 body = f.read_text(encoding="utf-8").strip()
                 if body:
                     entries.append((date_key, body))
-            elif f.name == "now.md":
-                mtime = f.stat().st_mtime
-                date_key = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-                body = f.read_text(encoding="utf-8").strip()
-                if body:
-                    entries.append((date_key, body))
     except OSError:
         pass
     return entries
+
+
+def parse_now_file(remember_dir: Path) -> Optional[Tuple[str, str]]:
+    """Parse now.md file into (date_key, summary) entry based on file mtime."""
+    now_path = remember_dir / "now.md"
+    if not now_path.is_file():
+        return None
+    try:
+        mtime = now_path.stat().st_mtime
+        date_key = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        body = now_path.read_text(encoding="utf-8").strip()
+        if body:
+            return (date_key, body)
+    except OSError:
+        pass
+    return None
+
+
+def parse_today_and_now_files(remember_dir: Path) -> List[Tuple[str, str]]:
+    """Backwards-compatible helper returning all today-*.md and now.md entries."""
+    today = parse_today_files(remember_dir)
+    now = parse_now_file(remember_dir)
+    if now:
+        today.append(now)
+    return today
 
 
 def parse_remember_handoff(remember_dir: Path) -> Optional[Tuple[str, float]]:
@@ -193,6 +215,33 @@ def parse_remember_handoff(remember_dir: Path) -> Optional[Tuple[str, float]]:
     except OSError:
         pass
     return None
+
+
+def merge_and_dedupe_lines(texts: Sequence[str], max_len: int = 2048) -> str:
+    """Join texts in order, deduplicating identical non-empty lines while preserving order, capped at max_len."""
+    seen_lines: set[str] = set()
+    result_lines: List[str] = []
+
+    for text in texts:
+        if not text:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                if result_lines and result_lines[-1] != "":
+                    result_lines.append("")
+                continue
+            if stripped in seen_lines:
+                continue
+            seen_lines.add(stripped)
+            result_lines.append(line)
+
+    merged = "\n".join(result_lines).strip()
+    if len(merged) > max_len:
+        merged = merged[:max_len]
+        if "\n" in merged:
+            merged = merged.rsplit("\n", 1)[0].strip() or merged
+    return merged
 
 
 def import_remember(
@@ -229,53 +278,126 @@ def import_remember(
             "handoff": None,
         }
 
-        # 1. recent.md -> day rollups
-        recent_entries = parse_recent_md(rem_dir / "recent.md")
-        for date_key, text in recent_entries:
-            clean = redact(text).strip()
+        # 1. Collect & merge day entries (order: recent -> today -> now)
+        day_sources: Dict[str, Dict[str, List[str]]] = {}
+
+        for date_key, text in parse_recent_md(rem_dir / "recent.md"):
+            day_sources.setdefault(date_key, {"recent": [], "today": [], "now": []})["recent"].append(text)
+
+        for date_key, text in parse_today_files(rem_dir):
+            day_sources.setdefault(date_key, {"recent": [], "today": [], "now": []})["today"].append(text)
+
+        now_entry = parse_now_file(rem_dir)
+        if now_entry:
+            date_key, text = now_entry
+            day_sources.setdefault(date_key, {"recent": [], "today": [], "now": []})["now"].append(text)
+
+        for date_key in sorted(day_sources.keys(), reverse=True):
+            texts = (
+                day_sources[date_key]["recent"]
+                + day_sources[date_key]["today"]
+                + day_sources[date_key]["now"]
+            )
+            merged = merge_and_dedupe_lines(texts, max_len=2048)
+            clean = redact(merged).strip()
+            if not clean:
+                continue
+
             existing = ep.get_rollup(proj, "day", date_key)
             if existing:
-                stats["rollups_skipped"] += 1
-                store_detail["day_rollups"].append({"key": date_key, "status": "skipped (exists)"})
+                existing_origin = (existing.get("origin") or "").strip().lower()
+                existing_summary = (existing.get("summary") or "").strip()
+                if existing_origin == "history-import" or "From Remember:" in existing_summary:
+                    stats["rollups_skipped"] += 1
+                    store_detail["day_rollups"].append({
+                        "key": date_key,
+                        "status": "skipped (already imported)",
+                    })
+                else:
+                    # Append under 'From Remember:'
+                    merged_summary = f"{existing_summary}\n\nFrom Remember:\n{clean}"
+                    if len(merged_summary) > 2048:
+                        merged_summary = merged_summary[:2048]
+                        if "\n" in merged_summary:
+                            merged_summary = merged_summary.rsplit("\n", 1)[0].strip() or merged_summary
+                    if not dry_run:
+                        ep.record_rollup(
+                            proj, "day", date_key, merged_summary,
+                            session_count=existing.get("session_count", 0),
+                            origin="history-import"
+                        )
+                    stats["rollups_imported"] += 1
+                    store_detail["day_rollups"].append({
+                        "key": date_key,
+                        "status": "appended",
+                        "preview": clean[:100],
+                    })
             else:
                 if not dry_run:
                     ep.record_rollup(proj, "day", date_key, clean, origin="history-import")
                 stats["rollups_imported"] += 1
-                store_detail["day_rollups"].append({"key": date_key, "status": "imported", "preview": clean[:100]})
+                store_detail["day_rollups"].append({
+                    "key": date_key,
+                    "status": "imported",
+                    "preview": clean[:100],
+                })
 
-        # 2. archive.md -> week rollups
-        archive_entries = parse_archive_md(rem_dir / "archive.md")
-        for week_key, text in archive_entries:
-            clean = redact(text).strip()
+        # 2. Collect & merge week entries from archive.md
+        week_sources: Dict[str, List[str]] = {}
+        for week_key, text in parse_archive_md(rem_dir / "archive.md"):
+            week_sources.setdefault(week_key, []).append(text)
+
+        for week_key in sorted(week_sources.keys(), reverse=True):
+            merged = merge_and_dedupe_lines(week_sources[week_key], max_len=2048)
+            clean = redact(merged).strip()
+            if not clean:
+                continue
+
             existing = ep.get_rollup(proj, "week", week_key)
             if existing:
-                stats["rollups_skipped"] += 1
-                store_detail["week_rollups"].append({"key": week_key, "status": "skipped (exists)"})
+                existing_origin = (existing.get("origin") or "").strip().lower()
+                existing_summary = (existing.get("summary") or "").strip()
+                if existing_origin == "history-import" or "From Remember:" in existing_summary:
+                    stats["rollups_skipped"] += 1
+                    store_detail["week_rollups"].append({
+                        "key": week_key,
+                        "status": "skipped (already imported)",
+                    })
+                else:
+                    merged_summary = f"{existing_summary}\n\nFrom Remember:\n{clean}"
+                    if len(merged_summary) > 2048:
+                        merged_summary = merged_summary[:2048]
+                        if "\n" in merged_summary:
+                            merged_summary = merged_summary.rsplit("\n", 1)[0].strip() or merged_summary
+                    if not dry_run:
+                        ep.record_rollup(
+                            proj, "week", week_key, merged_summary,
+                            session_count=existing.get("session_count", 0),
+                            origin="history-import"
+                        )
+                    stats["rollups_imported"] += 1
+                    store_detail["week_rollups"].append({
+                        "key": week_key,
+                        "status": "appended",
+                        "preview": clean[:100],
+                    })
             else:
                 if not dry_run:
                     ep.record_rollup(proj, "week", week_key, clean, origin="history-import")
                 stats["rollups_imported"] += 1
-                store_detail["week_rollups"].append({"key": week_key, "status": "imported", "preview": clean[:100]})
+                store_detail["week_rollups"].append({
+                    "key": week_key,
+                    "status": "imported",
+                    "preview": clean[:100],
+                })
 
-        # 3. today-*.md & now.md -> day rollups
-        today_entries = parse_today_and_now_files(rem_dir)
-        for date_key, text in today_entries:
-            clean = redact(text).strip()
-            existing = ep.get_rollup(proj, "day", date_key)
-            if existing:
-                stats["rollups_skipped"] += 1
-                store_detail["day_rollups"].append({"key": date_key, "status": "skipped (exists)"})
-            else:
-                if not dry_run:
-                    ep.record_rollup(proj, "day", date_key, clean, origin="history-import")
-                stats["rollups_imported"] += 1
-                store_detail["day_rollups"].append({"key": date_key, "status": "imported", "preview": clean[:100]})
-
-        # 4. remember.md -> handoff
+        # 3. remember.md -> handoff
         handoff_data = parse_remember_handoff(rem_dir)
         if handoff_data:
             text, mtime = handoff_data
             clean = redact(text).strip()
+            if len(clean) > 2048:
+                clean = clean[:2048]
             existing_handoff = ep.get_handoff(project=proj)
             existing_mtime = float(existing_handoff.get("created_at", 0)) if existing_handoff else 0.0
             if existing_handoff and existing_mtime >= mtime:
