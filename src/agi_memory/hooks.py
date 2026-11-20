@@ -174,6 +174,8 @@ def _clip(text: str, limit: int = _PREVIEW_CHARS) -> str:
 
 
 def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> None:
+    if _in_summarizer():
+        return
     """SessionStart / PreInvocation: Inject pinned blocks, precedents, and episodic recap into context.
 
     The episodic row is keyed by the harness's own session id when it sends one,
@@ -221,8 +223,12 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
         hits = l1.search("architecture convention pattern decision rule invariant", limit=3)
         recent_hits = [h.text for h in hits]
 
-        recent_sessions = ep.get_timeline(project=proj, limit=3)
-        if recent_sessions:
+        try:
+            episodic_recap = ep.get_session_recap(project=proj)
+            recent_sessions = ep.get_timeline(project=proj, limit=5)
+            session_count = len([s for s in recent_sessions if (s.get("summary") or "").strip() != "SKIP"])
+        except Exception:
+            recent_sessions = ep.get_timeline(project=proj, limit=3)
             session_count = len(recent_sessions)
             episodic_recap = EpisodicLayer.format_briefing(recent_sessions)
         try:  # must never cost the session its registration below
@@ -383,6 +389,8 @@ def prompt_recall(prompt: str, project: Optional[str] = None, db_path: Optional[
 
 
 def hook_user_prompt_submit(project: Optional[str] = None) -> None:
+    if _in_summarizer():
+        return
     """UserPromptSubmit: push matching past work; the first real prompt becomes the session goal."""
     sys.path.insert(0, str(REPO_DIR))
     payload = _read_hook_payload()
@@ -469,6 +477,8 @@ def stop_decision(payload: Dict[str, Any], project: Optional[str] = None,
 
 
 def hook_stop(project: Optional[str] = None) -> None:
+    if _in_summarizer():
+        return
     """Stop: ask once for the why behind a session's changes if explicitly enabled.
     
     In standard interactive sessions, emitting {"decision": "block"} causes Claude Code
@@ -520,6 +530,8 @@ def _ensure_ep_session(ep, sid: Optional[str], proj: str) -> Optional[str]:
 
 
 def hook_pre_tool(project: Optional[str] = None) -> None:
+    if _in_summarizer():
+        return
     """PreToolUse: one line on what this file/command already has. Silent on miss."""
     payload = _read_hook_payload()
     tool = payload.get("tool_name", "")
@@ -553,6 +565,8 @@ def hook_pre_tool(project: Optional[str] = None) -> None:
 
 
 def hook_post_tool(project: Optional[str] = None) -> None:
+    if _in_summarizer():
+        return
     """PostToolUse: log the run; on failure, suggest what followed that error before."""
     payload = _read_hook_payload()
     tool = payload.get("tool_name", "")
@@ -596,6 +610,8 @@ def hook_post_tool(project: Optional[str] = None) -> None:
 
 
 def hook_pre_compact(project: Optional[str] = None) -> None:
+    if _in_summarizer():
+        return
     """PreCompact: Curate high-signal working memory into L2 knowledge graph before context loss."""
     proj = project or detect_project()
     sys.path.insert(0, str(REPO_DIR))
@@ -611,8 +627,10 @@ def hook_pre_compact(project: Optional[str] = None) -> None:
         pass
 
 
-def hook_session_end(project: Optional[str] = None) -> None:
-    """SessionEnd / Stop: Finalize episodic session, commit vault, and trigger background sync."""
+def hook_session_end(project: Optional[str] = None, host: Optional[str] = None) -> None:
+    """SessionEnd / Stop: Finalize episodic session, summarize via host CLI, and trigger background sync."""
+    if _in_summarizer():
+        return
     payload = _read_hook_payload()
     sid = payload.get("session_id") or None
     proj = project or detect_project()
@@ -624,9 +642,40 @@ def hook_session_end(project: Optional[str] = None) -> None:
             from layers.episodic_layer import EpisodicLayer
         ep = EpisodicLayer(project=proj)
         if not sid:
-            ep.end_session(project=proj)
+            ended = ep.end_session(project=proj)
+            if ended:
+                sid = ended.get("session_id")
         elif ep.get_session(sid):  # an unregistered id must not close another session's row
             ep.end_session(session_id=sid, project=proj)
+    except Exception:
+        pass
+
+    # Spawn detached summarizer using detected host CLI or explicit host fallback
+    try:
+        try:
+            from agi_memory.summarizer import detect_host
+            from agi_memory.config import are_summaries_enabled
+        except ImportError:
+            from summarizer import detect_host
+            from config import are_summaries_enabled
+
+        resolved_host = detect_host() or host
+        if resolved_host and are_summaries_enabled():
+            env_pass = {}
+            if os.environ.get("AGI_MEMORY_DIR"):
+                env_pass["AGI_MEMORY_DIR"] = os.environ["AGI_MEMORY_DIR"]
+            if os.environ.get("AGI_MEMORY_DB"):
+                env_pass["AGI_MEMORY_DB"] = os.environ["AGI_MEMORY_DB"]
+            if os.environ.get("AGI_MEMORY_SUMMARIES"):
+                env_pass["AGI_MEMORY_SUMMARIES"] = os.environ["AGI_MEMORY_SUMMARIES"]
+            _spawn_detached([
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "summarize-session",
+                "--session-id", sid or "",
+                "--project", proj,
+                "--host", resolved_host,
+            ], env_overrides=env_pass)
     except Exception:
         pass
 
@@ -639,28 +688,41 @@ def hook_session_end(project: Optional[str] = None) -> None:
         pass
 
 
-def _spawn_detached(args: List[str]) -> None:
+def _spawn_detached(args: List[str], env_overrides: Optional[Dict[str, str]] = None) -> None:
     """Start a process that outlives this one, with no pipes back to it.
 
-    The child gets a sanitised environment. It used to inherit the parent's
-    verbatim, and the parent is often a hook fired from inside the test suite --
-    which sets AGI_MEMORY_VAULT and AGI_MEMORY_DIR to a temp directory it then
-    deletes. The child outlived the suite still holding those paths, so a sync
-    that named a vault by ambient environment could name a directory that no
-    longer existed. Stripping the AGI_MEMORY_* overrides makes the child fall
-    back to the documented defaults rather than to whatever the parent happened
-    to be pointing at, and AGI_MEMORY_HOOK propagates so a hook reached from
-    inside a hook chain cannot re-enter the suite.
+    The child gets a sanitised environment. Stripping the AGI_MEMORY_* overrides
+    makes the child fall back to documented defaults rather than ambient test paths,
+    unless explicitly passed in env_overrides.
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("AGI_MEMORY_")}
     env["AGI_MEMORY_HOOK"] = "1"
+    if env_overrides:
+        env.update(env_overrides)
     flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) \
         if os.name == "nt" else 0
     subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      env=env, start_new_session=os.name != "nt", creationflags=flags)
 
 
+def hook_summarize_session(session_id: str, project: str, host: str) -> None:
+    """Detached summarizer worker spawned by session-end."""
+    if _in_summarizer():
+        return
+    sys.path.insert(0, str(REPO_DIR))
+    try:
+        try:
+            from agi_memory.summarizer import summarize_and_compress
+        except ImportError:
+            from summarizer import summarize_and_compress
+        summarize_and_compress(session_id=session_id, project=project, host=host)
+    except Exception:
+        pass
+
+
 def hook_vault_sync() -> None:
+    if _in_summarizer():
+        return
     """Pull and push the vault; run detached by session-end."""
     sys.path.insert(0, str(REPO_DIR))
     try:
@@ -671,6 +733,11 @@ def hook_vault_sync() -> None:
         sync.sync(push=True, pull=True)
     except Exception:
         pass
+
+
+def _in_summarizer() -> bool:
+    """True when this process is a nested LLM summarizer call."""
+    return os.environ.get("AGI_MEMORY_SUMMARIZER") == "1"
 
 
 def _in_hook_chain() -> bool:
@@ -688,6 +755,8 @@ def _in_hook_chain() -> bool:
 
 
 def hook_pre_commit() -> None:
+    if _in_summarizer():
+        return
     """Git pre-commit: Verify test suite and offline invariants.
 
     CI runs this same suite on six platforms across five Python versions, so
@@ -720,6 +789,8 @@ def hook_pre_commit() -> None:
 
 
 def hook_post_commit(project: Optional[str] = None) -> None:
+    if _in_summarizer():
+        return
     """Git post-commit: Record commit into session & episodic memory, incrementally index code graph."""
     proj = project or detect_project()
     sys.path.insert(0, str(REPO_DIR))
@@ -947,7 +1018,7 @@ def install_claude_hooks(scope: str = "user", py_path: str = None) -> Tuple[bool
 
     cmd_start = f'"{py}" "{hooks_py}" session-start'
     cmd_compact = f'"{py}" "{hooks_py}" pre-compact'
-    cmd_end = f'"{py}" "{hooks_py}" session-end'
+    cmd_end = f'"{py}" "{hooks_py}" session-end --host claude'
     cmd_prompt = f'"{py}" "{hooks_py}" user-prompt-submit'
     cmd_pre = f'"{py}" "{hooks_py}" pre-tool'
     cmd_post = f'"{py}" "{hooks_py}" post-tool'
@@ -1050,7 +1121,7 @@ def install_agy_hooks(scope: str = "user", py_path: str = None) -> Tuple[bool, s
 
     # PreInvocation runs before every model invocation, not once per conversation.
     cmd_start = f'"{py}" "{hooks_py}" session-start --reuse'
-    cmd_end = f'"{py}" "{hooks_py}" session-end'
+    cmd_end = f'"{py}" "{hooks_py}" session-end --host agy'
 
     data.pop("agent-memory", None)  # legacy id, migrated in 0.9.1
     data["agi-memory"] = {
@@ -1131,7 +1202,8 @@ export default {
 
     const run = (verb, payload) => {
       try {
-        return execFileSync(PY, [HOOKS_PY, verb], {
+        const extra = verb === "session-end" ? ["--host", "opencode"] : [];
+        return execFileSync(PY, [HOOKS_PY, verb, ...extra], {
           encoding: "utf8",
           input: JSON.stringify(payload),
           stdio: ["pipe", "pipe", "ignore"],
@@ -1556,6 +1628,8 @@ def _opens_with_module_object(text: str) -> bool:
 
 
 def main() -> None:
+    if _in_summarizer():
+        return
     parser = argparse.ArgumentParser(
         prog="agent-memory-hooks",
         description="Lifecycle hook dispatcher and installer for agent-memory."
@@ -1587,6 +1661,12 @@ def main() -> None:
 
     p_end = subparsers.add_parser("session-end", help="Commit vault and trigger background Git sync")
     p_end.add_argument("--project", "-p", help="Project name override")
+    p_end.add_argument("--host", default=None, help="Host CLI fallback (claude, codex, opencode, agy)")
+
+    p_summ = subparsers.add_parser("summarize-session", help="Run detached session summarization and rollups")
+    p_summ.add_argument("--session-id", default="", help="Session ID to summarize")
+    p_summ.add_argument("--project", "-p", default="", help="Project name override")
+    p_summ.add_argument("--host", default="", help="Host CLI name")
 
     subparsers.add_parser("pre-commit", help="Verify offline test suite before commit")
     
@@ -1625,7 +1705,9 @@ def main() -> None:
     elif args.action == "pre-compact":
         hook_pre_compact(getattr(args, "project", None))
     elif args.action == "session-end":
-        hook_session_end(getattr(args, "project", None))
+        hook_session_end(getattr(args, "project", None), host=getattr(args, "host", None))
+    elif args.action == "summarize-session":
+        hook_summarize_session(getattr(args, "session_id", ""), getattr(args, "project", ""), getattr(args, "host", ""))
     elif args.action == "pre-commit":
         hook_pre_commit()
     elif args.action == "post-commit":

@@ -45,7 +45,8 @@ graph TD
 3. **L3 Episodic Session History (`src/agi_memory/layers/episodic_layer.py`)**:
    - Zero-dependency episodic memory answering *"What happened during previous agent sessions?"*
    - Tracks session start/end lifecycles, duration, touched files, events, and git commit deltas.
-   - Cross-session recaps automatically injected on session start, giving every assistant instant continuity across restarts.
+   - Per-host session summarization spawned detached at session-end using the session's native agent CLI (`claude`, `codex`, `opencode`, `agy`) with full credential/secret redaction and zero recursion.
+   - Tiered lazy compression (>3d daily, >2w weekly) and budgeted session-start recaps ensuring fast, noise-free briefings across restarts. Disable anytime via `AGI_MEMORY_SUMMARIES=0`.
 4. **L4 Structural Code Graph (`src/agi_memory/layers/code_layer.py`)**:
    - Zero-dependency code intelligence answering *"How is this codebase structurally connected?"*
    - Python stdlib `ast` + streaming regex parser for TypeScript, JavaScript, Go, Rust, and Dart with sha256 incremental hashing.

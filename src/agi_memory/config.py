@@ -252,3 +252,18 @@ def hidden_subprocess_kwargs(extra_creationflags: int = 0) -> dict:
     except Exception:
         pass
     return kwargs
+
+
+# Session summaries configuration
+SUMMARIES_ENABLED: bool = os.environ.get("AGI_MEMORY_SUMMARIES", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def are_summaries_enabled() -> bool:
+    """Return True if session summaries are enabled (default: True).
+
+    Can be disabled via environment variable AGI_MEMORY_SUMMARIES=0.
+    """
+    val = os.environ.get("AGI_MEMORY_SUMMARIES")
+    if val is not None:
+        return val.strip().lower() not in ("0", "false", "no", "off")
+    return SUMMARIES_ENABLED

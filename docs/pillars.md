@@ -63,6 +63,8 @@ AGI_AGENT_ID=reviewer claude
   `completed` is recapped with an explicit warning not to resume it without asking.
   Without this, a dropped design session comes back next time looking like an open
   task with a running start.
+- **Per-Host Session Summaries**: At session-end, `agi-memory` generates a concise one-sentence summary and infers the outcome using the same agent CLI that ran the session (`claude`, `codex`, `opencode`, or `agy`). Data is sent strictly to the provider of the CLI that ran the session, under that CLI's account, with zero credentials read by `agi-memory`. Prompts are capped (~30 KB) and redacted with `redact.py` before sending, and responses are redacted before storing in SQLite. If disabled or no CLI is available, deterministic fallback is used. Opt out anytime via `AGI_MEMORY_SUMMARIES=0` or `SUMMARIES_ENABLED=False` in `config.py`.
+- **Tiered Rollups & Budgeted Recaps**: Older sessions are lazily compressed into daily rollups (>3 days) and weekly rollups (>2 weeks) in `episodic_rollups`. At `session-start`, briefings render recent session summaries alongside tiered rollups under a strict byte budget, suppressing noise and avoiding unneeded "Outcome was never recorded" warnings for inferred outcomes.
 - **Session Timelines (`memory_timeline` / `agi-memory timeline`)**: Retrieve structured chronological histories of prior sessions and inspect what changes were made across tools.
 ```bash
 # Inspect recent session activity and touched files

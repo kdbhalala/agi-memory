@@ -67,8 +67,16 @@ agi-memory alias add k8s Kubernetes --category infra
 agi-memory alias rm k8s
 
 # Record how this session ended. Unmarked sessions stay `unknown`, and the next
-# session is told not to resume them.
+# session is told not to resume them. If omitted, the session-end hook uses the
+# host CLI to infer an outcome and generate a 1-sentence summary.
 agi-memory outcome completed        # or abandoned | blocked | superseded
+
+# Session Summaries & Privacy
+# At session-end, agi-memory invokes the session's native CLI (claude, codex, opencode, agy)
+# detached to produce a 1-sentence summary and infer outcome. Prompts and summaries are redacted.
+# Data goes strictly to that CLI's provider under its own account.
+# To disable automated summaries globally, set:
+export AGI_MEMORY_SUMMARIES=0
 ```
 
 ### Vault Sync

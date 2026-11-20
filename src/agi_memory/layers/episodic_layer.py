@@ -176,6 +176,20 @@ _STOPWORDS = {
 }
 
 
+
+def _apply_budget(text: str, max_bytes: int | None = None) -> str:
+    """Apply byte budget cap with truncation indicator."""
+    if not max_bytes or max_bytes <= 0:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    indicator = "\n... [budget reached]"
+    avail = max(0, max_bytes - len(indicator.encode("utf-8")))
+    truncated = encoded[:avail].decode("utf-8", errors="ignore")
+    return truncated + indicator
+
+
 class EpisodicLayer(MemoryLayer):
     """Native SQLite Episodic Memory layer for session timeline and history."""
     name = "episodic"
@@ -235,6 +249,8 @@ class EpisodicLayer(MemoryLayer):
                     "ON episodic_sessions(project, agent, started_at)")
         if "outcome" not in cols:
             cur.execute("ALTER TABLE episodic_sessions ADD COLUMN outcome TEXT DEFAULT 'unknown'")
+        if "origin" not in cols:
+            cur.execute("ALTER TABLE episodic_sessions ADD COLUMN origin TEXT DEFAULT ''")
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_episodic_project_time
             ON episodic_sessions(project, started_at DESC)
@@ -254,6 +270,30 @@ class EpisodicLayer(MemoryLayer):
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_episodic_events_sess
             ON episodic_events(session_id, timestamp)
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS episodic_rollups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                period_type TEXT NOT NULL,
+                period_key TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                session_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(project, period_type, period_key)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_episodic_rollups_proj_period
+            ON episodic_rollups(project, period_type, period_key)
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS episodic_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
         """)
 
         con.commit()
@@ -368,7 +408,7 @@ class EpisodicLayer(MemoryLayer):
         if not sid:
             con.close()
             return None
-        cur.execute("UPDATE episodic_sessions SET outcome = ? WHERE session_id = ?", (oc, sid))
+        cur.execute("UPDATE episodic_sessions SET outcome = ?, origin = 'agent-declared' WHERE session_id = ?", (oc, sid))
         con.commit()
         con.close()
         return sid
@@ -859,7 +899,7 @@ class EpisodicLayer(MemoryLayer):
 
         cols = ("id, session_id, project, goal, started_at, ended_at, duration_seconds, "
                 "git_branch, git_head_before, git_head_after, summary, touched_files, "
-                "commits, status, outcome, agent")
+                "commits, status, outcome, agent, origin")
         where, args = [], []
         if proj:
             where.append("project = ?")
@@ -897,6 +937,7 @@ class EpisodicLayer(MemoryLayer):
                 "status": r[13],
                 "outcome": r[14] or "unknown",
                 "agent": r[15] or "",
+                "origin": r[16] if len(r) > 16 and r[16] else "",
             })
         return results
 
@@ -912,7 +953,7 @@ class EpisodicLayer(MemoryLayer):
         cur = con.cursor()
         cur.execute("""
             SELECT id, session_id, project, goal, started_at, ended_at, duration_seconds,
-                   git_branch, git_head_before, git_head_after, summary, touched_files, commits, status, outcome, agent
+                   git_branch, git_head_before, git_head_after, summary, touched_files, commits, status, outcome, agent, origin
             FROM episodic_sessions WHERE session_id = ?
         """, (session_id,))
         row = cur.fetchone()
@@ -956,6 +997,7 @@ class EpisodicLayer(MemoryLayer):
             "status": row[13],
             "outcome": row[14] or "unknown",
             "agent": row[15] or "",
+            "origin": row[16] if len(row) > 16 and row[16] else "",
             "events": events
         }
 
@@ -1068,6 +1110,187 @@ class EpisodicLayer(MemoryLayer):
 
         return "\n".join(lines).strip()
 
+
+    def update_session_summary_and_outcome(
+        self,
+        session_id: str,
+        summary: str,
+        outcome: Optional[str] = None,
+        origin: str = "agent-inferred",
+    ) -> bool:
+        """Update session summary, origin, and outcome (only if outcome is still unknown)."""
+        con = self._get_con()
+        cur = con.cursor()
+        try:
+            cur.execute("""
+                UPDATE episodic_sessions
+                SET summary = ?,
+                    origin = CASE WHEN ? != '' THEN ? ELSE origin END,
+                    outcome = CASE
+                        WHEN COALESCE(outcome, 'unknown') = 'unknown' AND ? IS NOT NULL THEN ?
+                        ELSE outcome
+                    END
+                WHERE session_id = ?
+            """, (summary, origin, origin, outcome, outcome, session_id))
+            con.commit()
+            return cur.rowcount > 0
+        finally:
+            con.close()
+
+    def record_rollup(
+        self,
+        project: str,
+        period_type: str,
+        period_key: str,
+        summary: str,
+        session_count: int = 0,
+    ) -> None:
+        """Upsert a periodic rollup summary (period_type: 'day' or 'week')."""
+        con = self._get_con()
+        try:
+            con.execute("""
+                INSERT INTO episodic_rollups (project, period_type, period_key, summary, session_count)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(project, period_type, period_key) DO UPDATE SET
+                    summary = excluded.summary,
+                    session_count = excluded.session_count,
+                    created_at = CURRENT_TIMESTAMP
+            """, (project, period_type, period_key, summary, session_count))
+            con.commit()
+        finally:
+            con.close()
+
+    def get_rollup(self, project: str, period_type: str, period_key: str) -> Optional[Dict[str, Any]]:
+        """Get a specific rollup if it exists."""
+        con = self._get_con(mode="ro")
+        try:
+            cur = con.cursor()
+            cur.execute("""
+                SELECT id, project, period_type, period_key, summary, session_count, created_at
+                FROM episodic_rollups
+                WHERE project = ? AND period_type = ? AND period_key = ?
+            """, (project, period_type, period_key))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "project": row[1],
+                "period_type": row[2],
+                "period_key": row[3],
+                "summary": row[4],
+                "session_count": row[5],
+                "created_at": row[6],
+            }
+        finally:
+            con.close()
+
+    def get_rollups(
+        self,
+        project: Optional[str] = None,
+        period_type: Optional[str] = None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Get rollups for a project ordered newest first."""
+        proj = project or self.project
+        con = self._get_con(mode="ro")
+        try:
+            cur = con.cursor()
+            query = "SELECT id, project, period_type, period_key, summary, session_count, created_at FROM episodic_rollups WHERE 1=1"
+            params: list[Any] = []
+            if proj:
+                query += " AND project = ?"
+                params.append(proj)
+            if period_type:
+                query += " AND period_type = ?"
+                params.append(period_type)
+            query += " ORDER BY period_key DESC LIMIT ?"
+            params.append(limit)
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "project": r[1],
+                    "period_type": r[2],
+                    "period_key": r[3],
+                    "summary": r[4],
+                    "session_count": r[5],
+                    "created_at": r[6],
+                }
+                for r in rows
+            ]
+        finally:
+            con.close()
+
+    def get_sessions_older_than(self, days: float, project: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve completed sessions older than days."""
+        proj = project or self.project
+        con = self._get_con(mode="ro")
+        try:
+            cur = con.cursor()
+            query = """
+                SELECT id, session_id, project, goal, started_at, summary, touched_files, commits, outcome, origin
+                FROM episodic_sessions
+                WHERE status = 'completed'
+                  AND (julianday(CURRENT_TIMESTAMP) - julianday(started_at)) >= ?
+            """
+            params: list[Any] = [days]
+            if proj:
+                query += " AND project = ?"
+                params.append(proj)
+            query += " ORDER BY started_at ASC"
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "session_id": r[1],
+                    "project": r[2],
+                    "goal": r[3],
+                    "started_at": r[4],
+                    "summary": r[5],
+                    "touched_files": json.loads(r[6] or "[]"),
+                    "commits": json.loads(r[7] or "[]"),
+                    "outcome": r[8] or "unknown",
+                    "origin": r[9] or "",
+                }
+                for r in rows
+            ]
+        finally:
+            con.close()
+
+    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Get a metadata value from episodic_meta."""
+        con = self._get_con(mode="ro")
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT value FROM episodic_meta WHERE key = ?", (key,))
+            row = cur.fetchone()
+            return row[0] if row else default
+        finally:
+            con.close()
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Set a metadata value in episodic_meta."""
+        con = self._get_con()
+        try:
+            con.execute("""
+                INSERT INTO episodic_meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (key, value))
+            con.commit()
+        finally:
+            con.close()
+
+    def get_session_recap(self, project: Optional[str] = None, max_bytes: Optional[int] = None) -> str:
+        """Get startup briefing with recent sessions and daily/weekly rollups under budget."""
+        proj = project or self.project
+        recent = self.get_timeline(project=proj, limit=5)
+        daily = self.get_rollups(project=proj, period_type="day", limit=7)
+        weekly = self.get_rollups(project=proj, period_type="week", limit=4)
+        return self.format_briefing(recent, daily_rollups=daily, weekly_rollups=weekly, max_bytes=max_bytes)
+
     @staticmethod
     def format_recap(session: Optional[Dict[str, Any]]) -> str:
         """Format a single session recap for injection at session-start."""
@@ -1081,29 +1304,39 @@ class EpisodicLayer(MemoryLayer):
         commits = session.get("commits") or []
         cm_str = f" [Commit: {', '.join(commits[:2])}]" if commits else ""
 
-        # Outcome leads. A reader who stops after the first four words must not
-        # come away thinking an abandoned session is the task to continue.
         outcome = (session.get("outcome") or "unknown").lower()
-        # Name the writer when we know it. "Last session" implied yours; with two
-        # agents in one repo it frequently was not.
+        origin = (session.get("origin") or "").strip().lower()
         who = (session.get("agent") or "").strip()
         by = f", written by `{who}`" if who else ", writer unknown"
         line = f"**Last Session (`{sid}`, {outcome}{by})**: {goal} -> {summary}{tf_str}{cm_str}"
         if outcome in NOT_RESUMABLE:
-            line += f"\n- {_RESUME_WARNING[outcome]}"
+            if outcome == "unknown" and origin == "agent-inferred":
+                pass
+            elif outcome in _RESUME_WARNING:
+                line += f"\n- {_RESUME_WARNING[outcome]}"
         return line
 
     @staticmethod
-    def format_briefing(sessions: List[Dict[str, Any]]) -> str:
-        """Format recent sessions into a compact multi-session briefing for session-start."""
-        if not sessions:
+    def format_briefing(
+        sessions: List[Dict[str, Any]],
+        daily_rollups: Optional[List[Dict[str, Any]]] = None,
+        weekly_rollups: Optional[List[Dict[str, Any]]] = None,
+        max_bytes: Optional[int] = None,
+    ) -> str:
+        """Format recent sessions and rollups into a compact briefing for session-start."""
+        valid_sessions = [
+            s for s in (sessions or [])
+            if (s.get("summary") or "").strip() != "SKIP"
+        ]
+
+        if not valid_sessions and not daily_rollups and not weekly_rollups:
             return ""
 
         lines = []
-        for idx, s in enumerate(sessions):
+        for idx, s in enumerate(valid_sessions):
             sid = s.get("session_id", "previous")
+            summary = (s.get("summary") or "").strip()
             goal = s.get("goal") or "General development"
-            summary = s.get("summary") or "Work in progress"
             touched = s.get("touched_files") or []
             tf_str = f" ({len(touched)} files touched: {', '.join(touched[:3])}{'...' if len(touched) > 3 else ''})" if touched else ""
             commits = s.get("commits") or []
@@ -1113,9 +1346,32 @@ class EpisodicLayer(MemoryLayer):
             dur_str = f", {dur_s:.0f}s" if (0 < dur_s < 60) else (f", {dur_s/60:.1f}m" if dur_s >= 60 else "")
 
             outcome = (s.get("outcome") or "unknown").lower()
+            origin = (s.get("origin") or "").strip().lower()
             label = "Last Session" if idx == 0 else "Prior Session"
-            lines.append(f"- **{label} (`{sid}`, {outcome}{dur_str})**: {goal} -> {summary}{tf_str}{cm_str}")
+
+            if summary:
+                lines.append(f"- **{label} (`{sid}`, {outcome}{dur_str})**: {summary}{tf_str}{cm_str}")
+            else:
+                lines.append(f"- **{label} (`{sid}`, {outcome}{dur_str})**: {goal} -> Work in progress{tf_str}{cm_str}")
+
             if outcome in NOT_RESUMABLE:
-                lines.append(f"  - {_RESUME_WARNING[outcome]}")
-        return "\n".join(lines)
+                if outcome == "unknown" and origin == "agent-inferred":
+                    pass
+                elif outcome in _RESUME_WARNING:
+                    lines.append(f"  - {_RESUME_WARNING[outcome]}")
+
+        if daily_rollups:
+            lines.append("\n### Daily Rollups (Past 2 Weeks)")
+            for r in daily_rollups:
+                lines.append(f"- **{r['period_key']} ({r.get('session_count', 0)} sessions)**: {r['summary']}")
+
+        if weekly_rollups:
+            lines.append("\n### Weekly Rollups (Older)")
+            for r in weekly_rollups:
+                lines.append(f"- **Week {r['period_key']} ({r.get('session_count', 0)} sessions)**: {r['summary']}")
+
+        result = "\n".join(lines).strip()
+        if max_bytes and max_bytes > 0:
+            result = _apply_budget(result, max_bytes)
+        return result
 

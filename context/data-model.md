@@ -112,6 +112,7 @@ Tracks agent session lifecycles, duration, touched files, events, and git commit
   - `git_commit_end`: TEXT
   - `touched_files`: TEXT DEFAULT '[]' (JSON array of relative paths)
   - `metadata`: TEXT DEFAULT '{}'
+  - `origin`: TEXT (`agent-inferred`, `user-confirmed`, or NULL)
 - **`episodic_events`**:
   - `id`: INTEGER PRIMARY KEY AUTOINCREMENT
   - `session_id`: TEXT NOT NULL (indexed)
@@ -119,6 +120,19 @@ Tracks agent session lifecycles, duration, touched files, events, and git commit
   - `summary`: TEXT NOT NULL
   - `details`: TEXT DEFAULT '{}'
   - `created_at`: TEXT NOT NULL
+- **`episodic_rollups`**:
+  - `id`: INTEGER PRIMARY KEY AUTOINCREMENT
+  - `project`: TEXT NOT NULL (indexed)
+  - `tier`: TEXT NOT NULL (`daily`, `weekly`)
+  - `period_key`: TEXT NOT NULL (e.g. `YYYY-MM-DD` for daily, `YYYY-Www` for weekly)
+  - `summary`: TEXT NOT NULL
+  - `session_count`: INTEGER NOT NULL DEFAULT 0
+  - `created_at`: TEXT DEFAULT CURRENT_TIMESTAMP
+  - `UNIQUE(project, tier, period_key)`
+- **`episodic_meta`**:
+  - `key`: TEXT PRIMARY KEY (e.g. `last_compression_epoch`)
+  - `value`: TEXT NOT NULL
+  - `updated_at`: TEXT DEFAULT CURRENT_TIMESTAMP
 
 ### `code_files`, `code_symbols`, and `code_edges` (L4 Structural Code Graph)
 Zero-dependency AST and streaming regex symbol index and dependency graph.
