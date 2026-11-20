@@ -193,6 +193,7 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
     pinned_blocks: List[Dict[str, Any]] = []
     recent_hits: List[str] = []
     episodic_recap: str = ""
+    handoff_note: str = ""
     friction: str = ""
     session_count: int = 0
 
@@ -235,6 +236,10 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
             friction = EpisodicLayer.format_friction(ep.active_friction(project=proj))
         except Exception:
             friction = ""
+        try:
+            handoff_note = ep.consume_handoff(project=proj) or ""
+        except Exception:
+            handoff_note = ""
         # Register new active session, noting files already dirty so the stop
         # hook can tell this session's changes from ones it inherited.
         resumed = bool(sid and ep.get_session(sid))
@@ -286,12 +291,16 @@ def hook_session_start(project: Optional[str] = None, reuse: bool = False) -> No
     except Exception:
         pass
 
-    if not pinned_blocks and not recent_hits and not episodic_recap and not friction and not fresh_line:
+    if not pinned_blocks and not recent_hits and not episodic_recap and not friction and not fresh_line and not handoff_note:
         return
 
     output: List[str] = []
     output.append(f"<!-- AGENT_MEMORY_STARTUP_CONTEXT -->")
     output.append(f"# Agent Memory: Active Context & Precedents ({proj})")
+
+    if handoff_note:
+        output.append("\n## Handoff Note")
+        output.append(handoff_note)
 
     if episodic_recap:
         header = "## Prior Session Briefing" if session_count == 1 else f"## Recent Sessions (Last {session_count})"

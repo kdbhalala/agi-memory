@@ -14,7 +14,7 @@ graph TD
         CR["Crush / Pi"]
     end
 
-    MCP["agi-memory MCP Server (18 Stdio Tools)<br/><b>Epistemic:</b> <code>memory_recall</code> · <code>memory_recall_deep</code> · <code>memory_record</code> · <code>memory_pin</code> · <code>memory_unpin</code> · <code>memory_blocks</code><br/><b>Semantic:</b> <code>memory_promote</code> · <code>memory_sync</code> · <code>memory_bootstrap</code><br/><b>Episodic:</b> <code>memory_timeline</code> · <code>memory_session_outcome</code> · <code>memory_wip</code> · <code>memory_friction</code><br/><b>Structural:</b> <code>code_structure</code> · <code>code_callers</code> · <code>code_dependencies</code> · <code>code_impact</code> · <code>code_index</code>"]
+    MCP["agi-memory MCP Server (19 Stdio Tools)<br/><b>Epistemic:</b> <code>memory_recall</code> · <code>memory_recall_deep</code> · <code>memory_record</code> · <code>memory_pin</code> · <code>memory_unpin</code> · <code>memory_blocks</code><br/><b>Semantic:</b> <code>memory_promote</code> · <code>memory_sync</code> · <code>memory_bootstrap</code><br/><b>Episodic:</b> <code>memory_timeline</code> · <code>memory_session_outcome</code> · <code>memory_wip</code> · <code>memory_friction</code> · <code>memory_handoff</code><br/><b>Structural:</b> <code>code_structure</code> · <code>code_callers</code> · <code>code_dependencies</code> · <code>code_impact</code> · <code>code_index</code>"]
 
     subgraph Storage ["Native Four-Pillar Cognitive Architecture (Zero Dependencies)"]
         L1["L1 Epistemic Working Memory (SQLite FTS5)<br/>0.23ms · BM25 Ranking · Pinned Core Blocks"]

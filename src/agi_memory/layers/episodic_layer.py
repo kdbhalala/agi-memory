@@ -1324,6 +1324,49 @@ class EpisodicLayer(MemoryLayer):
         finally:
             con.close()
 
+    def set_handoff(self, note: str, project: Optional[str] = None) -> Dict[str, Any]:
+        """Store a redacted handoff note for the next session (max ~2 KB)."""
+        proj = project or self.project
+        try:
+            from agi_memory.redact import redact
+        except ImportError:
+            from redact import redact
+        cleaned = redact(note).strip()
+        if len(cleaned) > 2048:
+            cleaned = cleaned[:2048]
+        data = {
+            "note": cleaned,
+            "created_at": time.time(),
+            "deliveries": 0,
+            "project": proj,
+        }
+        self.set_meta(f"handoff:{proj}", json.dumps(data))
+        return data
+
+    def get_handoff(self, project: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get the current handoff note data for a project if one exists."""
+        proj = project or self.project
+        val = self.get_meta(f"handoff:{proj}")
+        if not val:
+            return None
+        try:
+            return json.loads(val)
+        except Exception:
+            return None
+
+    def consume_handoff(self, project: Optional[str] = None) -> Optional[str]:
+        """Get and count a delivery of the handoff note. Returns note if deliveries < 3, else None."""
+        proj = project or self.project
+        data = self.get_handoff(project=proj)
+        if not data:
+            return None
+        deliveries = int(data.get("deliveries", 0))
+        if deliveries >= 3:
+            return None
+        data["deliveries"] = deliveries + 1
+        self.set_meta(f"handoff:{proj}", json.dumps(data))
+        return data.get("note")
+
     def get_session_recap(self, project: Optional[str] = None, max_bytes: Optional[int] = None) -> str:
         """Get startup briefing with recent sessions and daily/weekly rollups under budget."""
         proj = project or self.project

@@ -200,7 +200,7 @@ in [Installation](docs/installation.md).
 | [Terminal Inspector (`agi-tui`)](docs/tui.md) | God-mode interactive dashboard, split-pane memory explorer, live FTS5 search |
 | [Installation](docs/installation.md) | Install options, upgrading, lifecycle hooks |
 | [CLI Usage](docs/cli.md) | Every `agi-memory` and `agi-integrate` command |
-| [Supported Assistants](docs/assistants.md) | Where each assistant's config lives, and the 18 MCP tools |
+| [Supported Assistants](docs/assistants.md) | Where each assistant's config lives, and the 19 MCP tools |
 | [How memory is organised](docs/pillars.md) | Notes, knowledge graph, session history, code index |
 | [Architecture](docs/architecture.md) | How the pieces fit together |
 | [Vault & Git Sync](docs/sync.md) | The memory files, syncing between machines, compaction |

@@ -745,6 +745,99 @@ class TestSessionSummaries(unittest.TestCase):
                 sess = ep.get_session(f"ses_test_recover_{i}")
                 self.assertIn("Summary for", sess.get("summary", ""))
 
+    # 24. Explicit handoff note storage, redaction, and truncation
+    def test_handoff_storage_and_redaction(self):
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        # Note with credential and excess length
+        secret = "ghp_111122223333444455556666777788889999"
+        long_text = ("A" * 3000) + " " + secret
+        res = ep.set_handoff(long_text, project=self.project)
+        self.assertNotIn(secret, res["note"])
+        self.assertLessEqual(len(res["note"]), 2048)
+        self.assertEqual(res["deliveries"], 0)
+
+        stored = ep.get_handoff(project=self.project)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["note"], res["note"])
+
+    # 25. Handoff delivery counting and 3-session max delivery limit
+    def test_handoff_consumption_and_max_deliveries(self):
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        ep.set_handoff("Fix the auth bug in auth.py next", project=self.project)
+
+        # 1st delivery
+        d1 = ep.consume_handoff(project=self.project)
+        self.assertEqual(d1, "Fix the auth bug in auth.py next")
+        self.assertEqual(ep.get_handoff(project=self.project)["deliveries"], 1)
+
+        # 2nd delivery
+        d2 = ep.consume_handoff(project=self.project)
+        self.assertEqual(d2, "Fix the auth bug in auth.py next")
+        self.assertEqual(ep.get_handoff(project=self.project)["deliveries"], 2)
+
+        # 3rd delivery
+        d3 = ep.consume_handoff(project=self.project)
+        self.assertEqual(d3, "Fix the auth bug in auth.py next")
+        self.assertEqual(ep.get_handoff(project=self.project)["deliveries"], 3)
+
+        # 4th delivery: expired (max 3 times reached)
+        d4 = ep.consume_handoff(project=self.project)
+        self.assertIsNone(d4)
+
+        # Replace handoff resets delivery count
+        ep.set_handoff("New task: refactor database", project=self.project)
+        self.assertEqual(ep.get_handoff(project=self.project)["deliveries"], 0)
+        d5 = ep.consume_handoff(project=self.project)
+        self.assertEqual(d5, "New task: refactor database")
+        self.assertEqual(ep.get_handoff(project=self.project)["deliveries"], 1)
+
+    # 26. Handoff delivered at session-start in its own section
+    def test_handoff_session_start_briefing(self):
+        from agi_memory.hooks import hook_session_start
+        import io
+
+        ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+        ep.set_handoff("Critical handoff: checkout feature branch before testing", project=self.project)
+
+        # Capture session-start stdout
+        with patch.dict(os.environ, {"AGI_MEMORY_DB": str(self.db_path), "AGI_MEMORY_SUMMARIES": "0"}), \
+             patch("sys.stdout", new=io.StringIO()) as fake_out:
+            hook_session_start(project=self.project)
+            output = fake_out.getvalue()
+
+        self.assertIn("## Handoff Note", output)
+        self.assertIn("Critical handoff: checkout feature branch before testing", output)
+
+    # 27. MCP tool memory_handoff and /handoff slash command emission
+    def test_handoff_mcp_and_slash_command(self):
+        from agi_memory import mcp_server, init_command
+
+        # Test tool in mcp_server.TOOLS
+        tool_names = [t["name"] for t in mcp_server.TOOLS]
+        self.assertIn("memory_handoff", tool_names)
+        self.assertEqual(len(tool_names), 19)
+
+        # Test calling tool
+        with patch.dict(os.environ, {"AGI_MEMORY_DB": str(self.db_path)}):
+            res = mcp_server.call_tool("memory_handoff", {
+                "note": "MCP handoff note test",
+                "project": self.project
+            })
+            self.assertIn("Handoff note recorded", res)
+
+            ep = EpisodicLayer(db_path=self.db_path, project=self.project)
+            self.assertEqual(ep.get_handoff(self.project)["note"], "MCP handoff note test")
+
+        # Test slash command rendering & install
+        for fmt in ("md_frontmatter", "workflow", "skill", "toml"):
+            rendered = init_command.render_handoff(fmt, project=self.project)
+            self.assertIn("handoff", rendered.lower())
+
+        with tempfile.TemporaryDirectory() as td:
+            res = init_command.install_handoff_command(td, project=self.project)
+            self.assertEqual(len(res), len(init_command.HANDOFF_PROJECT_TARGETS))
+            self.assertTrue(all(v.startswith("written") for v in res.values()))
+
 
 if __name__ == "__main__":
     unittest.main()

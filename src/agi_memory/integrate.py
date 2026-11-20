@@ -1317,7 +1317,14 @@ def cmd_install(args: argparse.Namespace) -> None:
             force=getattr(args, "force", False),
             tools=tool_names
         )
-        for path_str, status in sorted(cmd_results.items()):
+        handoff_results = _init_cmd.install_handoff_command(
+            target_dir=Path.cwd() if scope != "user" else ".",
+            scope=scope,
+            force=getattr(args, "force", False),
+            tools=tool_names
+        )
+        combined_results = {**cmd_results, **handoff_results}
+        for path_str, status in sorted(combined_results.items()):
             icon = "✓" if status.startswith("written") else ("-" if status.startswith("skipped") else "!")
             lbl = status.split(" — ")[-1]
             print(f"  [{icon}] {lbl:26}: {status.split(' — ')[0]}")
@@ -2015,13 +2022,18 @@ alwaysApply: true
     except Exception as e:
         print(f"  [-] Project hooks setup skipped: {e}")
 
-    # 8. The /agi-init slash command, in each assistant's own format
+    # 8. The /agi-init and /handoff slash commands, in each assistant's own format
     cmd_results = _init_cmd.install_init_command(target, project=proj_name, force=force)
-    written = [v for v in cmd_results.values() if v.startswith("written")]
     for path, status in sorted(cmd_results.items()):
         rel = Path(path).relative_to(target) if str(path).startswith(str(target)) else Path(path)
         mark = "✓" if status.startswith("written") else ("!" if status.startswith("failed") else "-")
         print(f"  [{mark}] /{_init_cmd.COMMAND_NAME}: {rel} ({status.split(' — ')[-1]})")
+
+    handoff_results = _init_cmd.install_handoff_command(target, project=proj_name, force=force)
+    for path, status in sorted(handoff_results.items()):
+        rel = Path(path).relative_to(target) if str(path).startswith(str(target)) else Path(path)
+        mark = "✓" if status.startswith("written") else ("!" if status.startswith("failed") else "-")
+        print(f"  [{mark}] /{_init_cmd.HANDOFF_COMMAND_NAME}: {rel} ({status.split(' — ')[-1]})")
 
     # 9. File fallback for hook-less tools: .agent/MEMORY.md
     try:

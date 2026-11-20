@@ -133,14 +133,21 @@ Recurring failure signature report: command errors that keep repeating across se
 - **Returns**: One line per signature as `signature -- N sessions, M failures`.
 - **Note**: Same source as `memory_wip`; empty until post-tool hooks have recorded runs.
 
-### 14. `code_structure`
+### 14. `memory_handoff`
+Explicit handoff note: stores a structured handoff note for the next session (what was done, what is next, blockers). Redacted, max ~2 KB.
+- **Parameters**:
+  - `note` (string, required): Handoff note content.
+  - `project` (string, optional): Project name.
+- **Returns**: Confirmation text. Delivered at next `session-start` up to 3 times or until replaced.
+
+### 15. `code_structure`
 Structural code graph outline: lists classes, functions, methods, imports, and exports for a file or directory.
 - **Parameters**:
   - `path` (string, required): File or directory path to inspect.
   - `project` (string, optional): Project name.
 - **Returns**: Hierarchical symbol structure and line ranges.
 
-### 15. `code_callers`
+### 16. `code_callers`
 Inbound call graph traversal: finds callers and inbound references to a function, method, or class.
 - **Parameters**:
   - `symbol` (string, required): Function, method, or class name to find callers for.
@@ -148,7 +155,7 @@ Inbound call graph traversal: finds callers and inbound references to a function
   - `max_depth` (integer, default: 3): Maximum recursive call graph traversal depth.
 - **Returns**: Ranked inbound caller hierarchy and call sites.
 
-### 16. `code_dependencies`
+### 17. `code_dependencies`
 Outbound dependency graph: finds outbound function calls, class instantiations, and module imports.
 - **Parameters**:
   - `symbol` (string, required): Symbol name to find outbound dependencies for.
@@ -156,7 +163,7 @@ Outbound dependency graph: finds outbound function calls, class instantiations, 
   - `max_depth` (integer, default: 3): Maximum recursive dependency traversal depth.
 - **Returns**: Ranked outbound dependency paths.
 
-### 17. `code_impact`
+### 18. `code_impact`
 Blast-radius impact analysis: evaluates affected upstream symbols and files if a target symbol or file is changed or refactored.
 - **Parameters**:
   - `target` (string, required): Target symbol or file path to analyze.
@@ -164,7 +171,7 @@ Blast-radius impact analysis: evaluates affected upstream symbols and files if a
   - `max_depth` (integer, default: 3): Maximum traversal depth.
 - **Returns**: Risk level (LOW/MEDIUM/HIGH), impacted file and symbol counts, and upstream dependency paths.
 
-### 18. `code_index`
+### 19. `code_index`
 Indexes a file or directory into the structural code graph (AST + streaming regex parser with incremental sha256 cache).
 - **Parameters**:
   - `path` (string, default: `"."`): File or directory path to index.
